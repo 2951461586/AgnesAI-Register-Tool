@@ -1,0 +1,93 @@
+"""台账合并语义（防静默缩水）。
+
+这些用例钉的是 Intern-Register-Tool 栽过两次的那个坑：
+**小规模运行覆盖掉整个台账**。判据是"字段只增不减"与"不让失败盖掉成功"。
+"""
+
+from src import ledger as L
+
+
+def _rec(email, status="success", **kw):
+    d = {"email": email, "status": status}
+    d.update(kw)
+    return d
+
+
+def test_merge_adds_new_and_keeps_old():
+    existing = [_rec("a@x.com"), _rec("b@x.com")]
+    new = [_rec("c@x.com")]
+    merged, kept, added, upgraded = L.merge_records(existing, new)
+    assert kept == 2
+    assert added == 1
+    assert upgraded == 0
+    assert [r["email"] for r in merged] == ["a@x.com", "b@x.com", "c@x.com"]
+
+
+def test_failure_does_not_overwrite_success():
+    existing = [_rec("a@x.com", "success", api_key="sk-1")]
+    new = [_rec("a@x.com", "failed", error="boom")]
+    merged, _kept, _added, upgraded = L.merge_records(existing, new)
+    assert merged[0]["status"] == "success"
+    assert merged[0]["api_key"] == "sk-1"
+    assert upgraded == 0
+
+
+def test_success_upgrades_failure():
+    existing = [_rec("a@x.com", "failed", error="boom")]
+    new = [_rec("a@x.com", "success", api_key="sk-1")]
+    merged, _kept, _added, upgraded = L.merge_records(existing, new)
+    assert merged[0]["status"] == "success"
+    assert merged[0]["api_key"] == "sk-1"
+    assert upgraded == 1
+
+
+def test_same_rank_union_keeps_old_fields():
+    """同级合并取**并集** —— 新记录缺的字段不能被抹掉。"""
+    existing = [_rec("a@x.com", "success", api_key="sk-1", plan="free")]
+    new = [_rec("a@x.com", "success", models_count=3)]
+    merged, _kept, _added, upgraded = L.merge_records(existing, new)
+    assert merged[0]["api_key"] == "sk-1"
+    assert merged[0]["plan"] == "free"
+    assert merged[0]["models_count"] == 3
+    assert upgraded == 1
+
+
+def test_shrink_guard_refuses(tmp_path):
+    import pytest
+
+    p = tmp_path / "accounts.json"
+    with pytest.raises(ValueError):
+        L.save(p, [{"email": "a@x.com"}], existing=[{"email": "a@x.com"}, {"email": "b@x.com"}])
+    # 显式覆盖（existing=[]）才放行
+    L.save(p, [{"email": "a@x.com"}], existing=[])
+    assert L.load_existing(p) == [{"email": "a@x.com"}]
+
+
+def test_snapshot_naming_and_latest_are_distinct(tmp_path, monkeypatch):
+    monkeypatch.setattr(L, "LEDGER_DIR", tmp_path / "ledger")
+    snap = L.snapshot_path(when=1_700_000_000)
+    assert snap.name.startswith("accounts-")
+    assert snap.parent.parent.name == "runs"
+    # latest.json 与快照**不是**同一个文件（后者不能当读源）
+    assert L.last_run_path().name == "latest.json"
+    assert L.last_run_path() != snap
+
+
+def test_ledger_path_returns_newest_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setattr(L, "LEDGER_DIR", tmp_path / "ledger")
+    runs = L.LEDGER_DIR / "runs" / "2026-10-13"
+    runs.mkdir(parents=True)
+    (runs / "accounts-20261013-100000.json").write_text("[]", encoding="utf-8")
+    (runs / "accounts-20261013-110000.json").write_text("[]", encoding="utf-8")
+    # 一个**命名不合规**的文件不能被当成读源
+    (runs / "notes.json").write_text("[]", encoding="utf-8")
+    assert L.ledger_path().name == "accounts-20261013-110000.json"
+
+
+def test_load_existing_tolerates_garbage(tmp_path):
+    p = tmp_path / "x.json"
+    p.write_text("{not json", encoding="utf-8")
+    assert L.load_existing(p) == []
+    p.write_text('{"a":1}', encoding="utf-8")
+    assert L.load_existing(p) == []
+    assert L.load_existing(tmp_path / "missing.json") == []
