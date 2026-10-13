@@ -30,8 +30,11 @@ Agnes 这边观察到的是**窗口限流**（自愈，不是封禁），而窗�
 
 import threading
 import time
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
+
+from src.redact import redact_url
 
 
 class SlotPoolEmpty(RuntimeError):
@@ -49,9 +52,25 @@ class SlotStats:
 
     @property
     def label(self) -> str:
-        """给报告用的短标签：`7901` 这类端口号，取不到就退回整串。"""
-        raw = self.url.rsplit("/", 1)[-1]
-        return raw.rsplit(":", 1)[-1] or self.url
+        """给报告用的短标签 —— 🔴 **不能泄凭据**。
+
+        旧实现是 `url.rsplit(":", 1)[-1]`，对 `http://127.0.0.1:7901` 恰好
+        给出 `7901`（想要的行为），但对 `host:port:user:pass`（`config.proxies()`
+        接受的第二种形态）最后一段是**密码** —— 实测泄漏过：收尾报告里
+        每个槽位的"标签"就是代理密码，而报告是最容易被贴进 issue / 截图的东西。
+
+        规则：
+          · 末段是**纯数字**（端口）⇒ 就用它（保留原来的好行为）；
+          · 否则退回**脱敏后**的 `host:port`，并用一个**稳定短哈希**区分同 host
+            的多个槽位 —— 否则 10 个槽位在报告里长得一模一样，这一栏就废了。
+        """
+        shown = redact_url(self.url)
+        tail = shown.rsplit(":", 1)[-1]
+        if tail.isdigit():
+            return tail
+        hostpart = shown.split("://", 1)[-1].split("@")[-1]
+        base = ":".join(hostpart.split(":")[:2]) or hostpart
+        return f"{base}#{zlib.crc32(self.url.encode('utf-8')) % 1000:03d}"
 
 
 class SlotPool:
