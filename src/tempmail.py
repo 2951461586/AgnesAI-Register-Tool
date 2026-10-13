@@ -247,17 +247,48 @@ class TempMailClient:
         ⚠ 返回列表长度可能**小于** `count`（Worker 侧生成失败时静默少给）。
           调用方必须自己检查长度 —— 少给会被下游当成"邮箱建不出来"，
           而真实原因（域名配错 / D1 写配额）会被这条笼统错误盖住。
+
+        🔴 **连接类错误与 5xx 要重试**（`config.MAIL_RETRIES`），与
+          `wait_for_mail` 同一套理由：建地址是**每个账号的第一枪**，
+          这里一次瞬断就把整条链判死，代价与收益完全不成比例。
+          10 批实测：8 次失败是 `ConnectionResetError 10054` /
+          `RemoteDisconnected` —— 而收信是**直连**（不走代理），
+          所以换出口没用，只能重试。
+        ⚠ 4xx（凭据错 / 域名不存在）**不重试**：那是我们的问题，
+          重试只会把"配置错了"伪装成"偶发失败"。
         """
-        r = self.session.post(
-            f"{self.base}/api/mailboxes",
-            json={"domain": domain or config.WORKER_DOMAIN, "count": count},
-            timeout=self.timeout,
+        body = {"domain": domain or config.WORKER_DOMAIN, "count": count}
+        last = ""
+        for attempt in range(config.MAIL_RETRIES + 1):
+            try:
+                r = self.session.post(
+                    f"{self.base}/api/mailboxes", json=body, timeout=self.timeout
+                )
+                r.raise_for_status()
+                data = r.json()
+                if not data.get("ok"):
+                    # Worker 明确回 `ok:false` = 它拒了，重试不会变好。
+                    raise RuntimeError(f"create_mailbox failed: {data}")
+                return data.get("emails", []) or []
+            except requests.HTTPError as ex:
+                code = ex.response.status_code if ex.response is not None else 0
+                if code and code < 500:
+                    raise
+                last = f"HTTP {code}"
+            except (requests.ConnectionError, requests.Timeout) as ex:
+                # 涵盖 `ConnectionResetError 10054` 与 `RemoteDisconnected`
+                # （两者都是 `ConnectionError` 的子类）。
+                last = f"{type(ex).__name__}: {ex}"
+            except ValueError as ex:
+                # Cloudflare 的 `Error 1101` 会回一页 HTML —— `r.json()` 在这里炸，
+                # 但它与 5xx 同类（可重试），不是我们的请求有问题。
+                last = f"非 JSON 响应（可能 Cloudflare 错误页）: {ex}"
+            if attempt >= config.MAIL_RETRIES:
+                break
+            time.sleep(min(config.MAIL_POLL_INTERVAL * (attempt + 1), 3.0))
+        raise RuntimeError(
+            f"create_mailbox 连续失败 {config.MAIL_RETRIES + 1} 次（最近：{last}）"
         )
-        r.raise_for_status()
-        data = r.json()
-        if not data.get("ok"):
-            raise RuntimeError(f"create_mailbox failed: {data}")
-        return data.get("emails", []) or []
 
     # ── 邮件读取 ──────────────────────────────────────────────
     def list_mails(self, limit: int | None = None, email: str | None = None) -> list[Mail]:

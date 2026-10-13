@@ -145,6 +145,16 @@ KEY_NAME = os.getenv("AR_KEY_NAME", "").strip() or "auto"
 # 约 0.3~0.6s，再密就只是在打 Cloudflare。
 MAIL_POLL_INTERVAL = _env_float("AR_MAIL_POLL_INTERVAL", 0.8)
 MAIL_POLL_TIMEOUT = _env_int("AR_MAIL_POLL_TIMEOUT", 120)
+# 建地址（`create_mailbox`）失败后的重试次数 —— **只对连接类错误与 5xx**。
+#
+# 🔴 为什么需要它：实测 5 个生产者并发打 Worker 时，Cloudflare 会**掉连接**
+#    （`ConnectionResetError 10054` / `RemoteDisconnected` / 非 JSON 错误页），
+#    而 `create_mailbox` 原先**一次不成就判死** —— 整条账号链跟着失败。
+#    10 批实测里有 8 次失败是这个原因，且它发生在**收信侧**（直连，不走代理），
+#    所以换出口没用。重试的代价是一次往返，不重试的代价是一个账号。
+# 4xx（凭据错 / 域名不存在）**不重试**：那是我们的问题，重试只会把
+# "配置错了"伪装成"偶发失败"。
+MAIL_RETRIES = max(0, _env_int("AR_MAIL_RETRIES", 2))
 REQUEST_TIMEOUT = _env_float("AR_REQUEST_TIMEOUT", 30)
 # 推理网关比控制台慢（首 token 可能要几秒），单独给一个更宽的预算。
 VERIFY_TIMEOUT = _env_float("AR_VERIFY_TIMEOUT", 60)
