@@ -62,6 +62,11 @@ from src import report as _report  # noqa: E402
 from src.pipeline import STAGES, error_kind_of, run_batch  # noqa: E402
 from src.proxypool import SlotPool  # noqa: E402
 
+# 🔴 必须在**任何 print 之前**：Windows 控制台默认 GBK，而下面到处是 emoji，
+#    不重配会在启动提示行就 UnicodeEncodeError —— 一个请求都发不出去，
+#    而且 exit 码还停在 0，看起来像“配置有问题”（实测踩过）。
+_cli.setup_console()
+
 
 def main(argv=None):
     ap = argparse.ArgumentParser(

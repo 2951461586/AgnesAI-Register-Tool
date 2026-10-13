@@ -19,7 +19,7 @@ def test_redact_url_strips_userinfo():
 
 
 def test_redact_url_keeps_url_without_userinfo():
-    # 没有账密的 URL（槽位代理常见形态）原样返回，不画蛇添足
+    # 没有账密的 URL 原样返回，不画蛇添足
     assert R.redact_url("http://127.0.0.1:7901") == "http://127.0.0.1:7901"
 
 
@@ -30,8 +30,19 @@ def test_redact_url_keeps_scheme_and_port():
 
 def test_redact_url_handles_empty_and_non_url():
     assert R.redact_url("") == ""
-    # 不是 URL（没有 `://`）时不猜，原样返回
+    # 只有 host:port（没账密）时不猜，原样返回
     assert R.redact_url("203.0.113.30:8080") == "203.0.113.30:8080"
+
+
+def test_redact_url_masks_host_port_user_pass_form():
+    """`host:port:user:pass` 是 `config.proxies()` 的第二种写法 —— 必须也打码。
+
+    🔴 回归用例：只认 `scheme://user:pass@host` 的版本会把槽位密码原样打进
+       stdout（`tools/probes/probe_slots.py` 正是用 `redact_url(slot)` 显示的）。
+    """
+    slot = "us.proxy.example:2000:acct-region-SG-sid-abc:t0psecret"
+    assert R.redact_url(slot) == "us.proxy.example:2000:***:***"
+    assert "t0psecret" not in R.redact_url(slot)
 
 
 # ── redact：默认把整个串藏起来 ────────────────────────────────────

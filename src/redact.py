@@ -16,18 +16,33 @@
 
 
 def redact_url(url: str) -> str:
-    """把 URL 的 userinfo（`user:pass@`）换成 `***`，其余保留。
+    """把 URL / 代理串里的账密换成 `***`，其余保留。
 
-    http://user:pass@203.0.113.30:8080  →  http://***@203.0.113.30:8080
-    http://127.0.0.1:7901               →  原样（没有 userinfo）
+    🔴 **两种写法都要认** —— 它们都是 `config.proxies()` 接受的输入：
+
+        scheme://user:pass@host:port  →  scheme://***@host:port
+        host:port:user:pass            →  host:port:***:***
+
+    只处理前者的版本是个**真实的泄漏**：`probe_slots.py` 用 `redact_url(slot)`
+    显示槽位，而槽位清单最常见的写法恰恰是第二种 —— 于是密码原样进了 stdout
+    （与 "`IR_PROXY=<完整串>` 被打出来" 是同一类事故）。
+
+    ⚠ 无账密的串（`http://127.0.0.1:7901` / `203.0.113.30:8080`）原样返回。
     """
-    if not url or "://" not in url:
-        return url or ""
-    scheme, _, rest = url.partition("://")
-    if "@" not in rest:
-        return url
-    _userinfo, _, hostpart = rest.rpartition("@")
-    return f"{scheme}://***@{hostpart}"
+    if not url:
+        return ""
+    if "://" in url:
+        scheme, _, rest = url.partition("://")
+        if "@" not in rest:
+            return url
+        _userinfo, _, hostpart = rest.rpartition("@")
+        return f"{scheme}://***@{hostpart}"
+    # `host:port:user:pass` —— 与 `config.proxies()` 同一套解析，别在这里另写一份。
+    parts = url.split(":")
+    if len(parts) == 4:
+        host, port, _user, _pwd = parts
+        return f"{host}:{port}:***:***"
+    return url
 
 
 def redact(raw: str, keep: int = 0) -> str:
