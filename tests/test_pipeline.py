@@ -203,6 +203,30 @@ def test_verify_failure_is_non_fatal(monkeypatch):
     assert rec.stages["verify"].startswith("auth_failed")
 
 
+def test_verify_ms_is_per_record_not_whole_phase(monkeypatch):
+    """🔴 回归：`verify_ms` 必须是**每个账号自己那一段**。
+
+    实测踩过：`run_batch` 围着整个 `verify_keys` 取一次 `t0` 再发给所有记录
+    ⇒ 5 个账号的 `verify_ms` 全是同一个 `70414`，报告把"校验阶段总时长"
+    记到**每个**账号头上，把"单 key 全链路速率"整体带偏。
+
+    这里用可控假时钟（不 sleep）：一个账号的校验耗时必须等于它自己那一段，
+    而不是阶段总时长。
+    """
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(P.time, "time", lambda: clock["t"])
+
+    def fake_verify(key, **kw):
+        clock["t"] += 3.0
+        return {"ok": True, "note": "ok(1 model)", "models": ["m"], "usage": {}}
+
+    monkeypatch.setattr(P._apikey, "verify", fake_verify)
+    rec = P.AccountRecord(email="a@x.com", status="success", api_key="sk-A")
+    P.verify_keys([rec], verbose=False, log=lambda *_: None)
+    assert rec.timings["verify_ms"] == 3000
+    assert rec.models_count == 1
+
+
 def test_make_password_policy():
     for _ in range(20):
         pw = P.make_password(12)

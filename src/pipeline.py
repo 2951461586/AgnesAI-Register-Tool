@@ -906,6 +906,7 @@ def verify_keys(records: list, *, verbose: bool = True, log=_print) -> None:
         return
 
     def one(rec: AccountRecord) -> tuple:
+        t0 = time.time()
         try:
             res = _apikey.verify(rec.api_key, attempts=3, delay=2.0)
             if res["ok"]:
@@ -914,6 +915,13 @@ def verify_keys(records: list, *, verbose: bool = True, log=_print) -> None:
             return rec, str(res["note"])
         except Exception as ex:  # noqa: BLE001
             return rec, f"failed: {str(ex)[:100]}"
+        finally:
+            # 🔴 计时必须在**这里**（每个账号自己那一段），不能在 `run_batch`
+            #    里围着整个 `verify_keys` 取一次 `t0` 再发给所有记录 —— 那样
+            #    每条拿到的是**同一个值** = 整个校验阶段的时长，而它是并行跑的。
+            #    实测后果：5 个账号的 `verify_ms` 全是 `70414`，报告把 70s
+            #    记到**每个**账号头上，把"单 key 全链路速率"整体带偏。
+            rec.timings["verify_ms"] = int((time.time() - t0) * 1000)
 
     with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as ex:
         for f in [ex.submit(one, r) for r in targets]:
@@ -1114,10 +1122,9 @@ def run_batch(
     for th in consumers:
         th.join()
 
-    t_verify = time.time()
+    # 逐条计时由 `verify_keys.one()` 自己写进 `rec.timings["verify_ms"]` ——
+    # 不能在这里取一次 `t0` 发给所有人（见 `one()` 里的注释）。
     verify_keys(done, verbose=verbose, log=log)
-    for r in done:
-        r.timings["verify_ms"] = int((time.time() - t_verify) * 1000)
     return done
 
 
