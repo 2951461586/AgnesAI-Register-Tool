@@ -803,6 +803,26 @@ def finish(ticket: Ticket, *, client_factory=None, slot_pool=None, log=_print) -
             rec.fail(classify(ex), f"注册失败：{ex}", stage="register")
             rec.timings["register_ms"] = int((time.time() - t0) * 1000)
             return rec
+    else:
+        # 🔴 循环**没有 `break`** 就结束了 ⇒ **注册请求一次都没发出去**：
+        #    每一次尝试都被上面的「IP 窗口等不起 → 换出口」给 `continue` 掉了。
+        #    那条路径**没有** `attempt >= REGISTER_RETRIES` 的兜底，所以它能
+        #    安静地把所有尝试吃完 —— 与 `provision` 里那个是同一类缺陷。
+        #
+        #    🔴 这里**绝不能**往下走：下面会拿 `body=None` 算出空的 `user`，
+        #    然后 `rec.mark_ok("register", "uid=")` —— 把**从没注册过**的账号
+        #    标成"注册成功"，再拿它去登录，最后以
+        #    `登录失败：HTTP 401 Invalid username or password` 收场。
+        #    实测踩到 2 次：`stages['register'] == 'ok(uid=)'`（uid 是空的），
+        #    而报告把原因指向**密码**，与真相（注册根本没发出去）恰好相反。
+        rec.fail(
+            ERR_QUOTA_GUARD,
+            f"注册请求一次都没发出去（{config.REGISTER_RETRIES + 1} 次尝试"
+            f"全被「IP 窗口等不起 → 换出口」消耗）",
+            stage="register",
+        )
+        rec.timings["register_ms"] = int((time.time() - t0) * 1000)
+        return rec
     rec.timings["register_ms"] = int((time.time() - t0) * 1000)
     if waited:
         rec.timings["register_wait_ms"] = int(waited * 1000)
@@ -814,10 +834,18 @@ def finish(ticket: Ticket, *, client_factory=None, slot_pool=None, log=_print) -
         if isinstance((body or {}).get("data"), dict)
         else None
     )
-    if isinstance(user, dict):
-        rec.user_id = str(user.get("id") or "")
-        rec.user_uuid = str(user.get("uuid") or "")
-        rec.display_id = str(user.get("display_id") or "")
+    # 🔴 注册响应里必须有 `data.user.id` —— **HTTP 200 也可能是空壳**。
+    #    缺了就说明账号没真建出来；继续标 ok 会把"没注册"伪装成"密码错"。
+    if not isinstance(user, dict) or not user.get("id"):
+        rec.fail(
+            ERR_REJECTED,
+            f"注册响应缺少 data.user.id（body={str(body)[:120]}）",
+            stage="register",
+        )
+        return rec
+    rec.user_id = str(user.get("id") or "")
+    rec.user_uuid = str(user.get("uuid") or "")
+    rec.display_id = str(user.get("display_id") or "")
     rec.mark_ok("register", f"uid={rec.user_id}")
 
     # ② 密码登录 —— **换一条全新的 JWT**。这一步才是"账号真能用"的证明：
