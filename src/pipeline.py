@@ -409,8 +409,7 @@ class SlidingWindow:
                 if wait > 0:
                     if max_wait is not None and wait > max_wait:
                         raise WindowBusy(
-                            f"本地滑动窗口已满，还要等 {wait:.0f}s"
-                            f"（封顶 {max_wait:g}s，等不起）",
+                            f"本地滑动窗口已满，还要等 {wait:.0f}s（封顶 {max_wait:g}s，等不起）",
                             wait_s=wait,
                         )
                     time.sleep(wait)
@@ -810,7 +809,11 @@ def finish(ticket: Ticket, *, client_factory=None, slot_pool=None, log=_print) -
     if rotated_from:
         rec.proxy_rotated = " → ".join([*rotated_from, ticket.proxy or "(直连)"])
     rec.proxy = ticket.proxy or rec.proxy
-    user = (body or {}).get("data", {}).get("user") if isinstance((body or {}).get("data"), dict) else None
+    user = (
+        (body or {}).get("data", {}).get("user")
+        if isinstance((body or {}).get("data"), dict)
+        else None
+    )
     if isinstance(user, dict):
         rec.user_id = str(user.get("id") or "")
         rec.user_uuid = str(user.get("uuid") or "")
@@ -904,7 +907,9 @@ def verify_app(rec: AccountRecord, client) -> bool:
         return False
     finally:
         rec.timings["app_ms"] = int((time.time() - t0) * 1000)
-    rec.mark_ok("app", f"plan={rec.plan}, keys<={rec.key_max}" if rec.key_max else f"plan={rec.plan}")
+    rec.mark_ok(
+        "app", f"plan={rec.plan}, keys<={rec.key_max}" if rec.key_max else f"plan={rec.plan}"
+    )
     return True
 
 
@@ -1097,9 +1102,7 @@ def run_batch(
                 if item is sentinel:
                     return
                 try:
-                    rec = finish(
-                        item, client_factory=client_factory, slot_pool=slot_pool, log=log
-                    )
+                    rec = finish(item, client_factory=client_factory, slot_pool=slot_pool, log=log)
                 except Exception as ex:  # noqa: BLE001
                     # 🔴 兜底：`finish()` 抛出未预期异常时**不能**让 consumer
                     #    线程死掉 —— 线程死 = 这条记录永远不 `record_out` =
