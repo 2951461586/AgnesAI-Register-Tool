@@ -160,15 +160,29 @@ def _as_float(raw, default: float = 0.0) -> float:
         return default
 
 
-def _print(msg) -> None:
-    """默认日志出口 —— **必须 flush**。
+# 🔴 打印锁：生产者与消费者线程都会往 stdout 打进度，而 `print()` 对
+#    多段写入**不是原子的** —— 多线程并发时行会互相撕裂。实测症状：
+#    `▸ <email> 邮箱+验证码就绪` 的邮箱位被别的线程覆盖成空白，看起来像
+#    "邮箱是空的"，把排查引到完全错误的方向。
+#    ⚠ 它**必须**与 `run_batch` 里那把 `lock` 分开：那把锁保护共享状态，
+#      而 `record_out` 会持有它；打印再抢同一把锁就是死锁风险。
+_PRINT_LOCK = threading.Lock()
 
-    🔴 批量运行几乎总是把 stdout 重定向到文件 / 管道（`python run.py | tee log`），
-      而 Python 对**非 tty** 的 stdout 用块缓冲：不 flush 的话，进程被 Ctrl-C /
-      超时杀掉时，缓冲里的进度**全部丢失** —— 看起来像"卡住了一句话都没打"，
-      而实际跑了大半。这个坑实测踩到过（一次 420s 的跑批，输出只剩预检那四行）。
+
+def _print(msg) -> None:
+    """默认日志出口 —— **必须 flush**，且**必须串行化**。
+
+    🔴 为什么必须 flush：批量运行几乎总是把 stdout 重定向到文件 / 管道
+       （`python run.py | tee log`），而 Python 对**非 tty** 的 stdout 用块缓冲：
+       不 flush 的话，进程被 Ctrl-C / 超时杀掉时，缓冲里的进度**全部丢失** ——
+       看起来像"卡住了一句话都没打"，而实际跑了大半。这个坑实测踩到过
+       （一次 420s 的跑批，输出只剩预检那四行）。
+
+    🔴 为什么必须持锁：见 `_PRINT_LOCK` 上方。少了它，多线程日志会撕裂成
+       看似合理但**是错的信息** —— 比丢日志更坏。
     """
-    print(msg, flush=True)
+    with _PRINT_LOCK:
+        print(msg, flush=True)
 
 
 @dataclass
@@ -613,13 +627,23 @@ def provision(
         # ── 建邮箱（每次重试都新建：换域名就得换地址）──────────────
         rec.enter("mailbox")
         emails = mail.create_mailbox(domain, 1)
-        if not emails:
-            # Worker 少给地址时必须**立刻**失败：不检查的话下面会拿空串去发信，
-            # 报错点离原因很远（服务端会说"邮箱格式不对"）。
+        # 🔴 必须校验**元素**，不能只查 `if not emails`。
+        #    Worker 在异常路径下会返回**列表非空但元素是空串**（`[""]`）——
+        #    只查列表的话空地址会一路走下去，后果比"报错点偏远"严重得多：
+        #      · 收信是按**收件人**过滤的（`GET /api/inbox?email=`），空收件人
+        #        等于**不设限** ⇒ 可能抽到**别人邮件的验证码**，把别人的地址
+        #        当成自己的账号注册掉；
+        #      · 日志表现为"邮箱+验证码就绪"但邮箱位是空的（实测见过）。
+        #    ⚠ 不能写成 `str(emails[0]).strip()`：`None` 会变成字符串 `"None"`
+        #      —— 一个**看着合法**的假地址，比空串更难查。
+        first = emails[0] if emails else None
+        address = first.strip() if isinstance(first, str) else ""
+        if not address:
             raise AgnesRejected(
-                "邮箱 Worker 没返回地址（create_mailbox 返回空）", code="NO_MAILBOX"
+                f"邮箱 Worker 没返回有效地址（create_mailbox 返回 {emails!r}）",
+                code="NO_MAILBOX",
             )
-        rec.email = emails[0]
+        rec.email = address
         rec.mail_domain = domain
         if not rec.timings.get("mailbox_ms"):
             rec.timings["mailbox_ms"] = int((time.time() - t0) * 1000)

@@ -167,6 +167,23 @@ def test_no_mailbox_is_rejected(monkeypatch):
     assert rec.stages["mailbox"] == "failed"
 
 
+def test_empty_mailbox_address_is_rejected(monkeypatch):
+    """🔴 回归：**列表非空但元素是空串**（`[""]`）必须立刻失败。
+
+    Worker 在异常路径下会这么返回。只查 `if not emails` 的版本会拿空地址
+    一路走下去 —— 而收信是按**收件人**过滤的（`GET /api/inbox?email=`），
+    空收件人等于**不设限**，可能抽到别人邮件的验证码。
+    实测症状：日志里 `▸ <空> 邮箱+验证码就绪`。
+    """
+    for bad in ([""], ["   "], [None]):
+        results = _run(monkeypatch, mail=FakeMail(create=bad))
+        rec = results[0]
+        assert rec.status == "failed", bad
+        assert P.error_kind_of(rec) == P.ERR_REJECTED, bad
+        assert rec.stages["mailbox"] == "failed", bad
+        assert rec.email == "", bad
+
+
 def test_verify_failure_is_non_fatal(monkeypatch):
     _patch_verify(monkeypatch, ok=False, note="auth_failed: HTTP 401")
     monkeypatch.setattr(P.config, "REGISTER_MAX_PER_WINDOW", 100)
