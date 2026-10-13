@@ -56,7 +56,10 @@ class FakeClient:
             raise self.register_error
         return {
             "code": 200,
-            "data": {"access_token": "reg-jwt", "user": {"id": 11, "uuid": "u-1", "display_id": "d-1"}},
+            "data": {
+                "access_token": "reg-jwt",
+                "user": {"id": 11, "uuid": "u-1", "display_id": "d-1"},
+            },
         }
 
     def login(self, email, password):
@@ -129,7 +132,9 @@ def test_success_path(monkeypatch):
 def test_quota_at_send_code_is_quota_kind(monkeypatch):
     from src.agnes import AgnesQuota
 
-    client = FakeClient(send_error=AgnesQuota("Too many registration attempts", code="RATE_LIMITED"))
+    client = FakeClient(
+        send_error=AgnesQuota("Too many registration attempts", code="RATE_LIMITED")
+    )
     results = _run(monkeypatch, client=client)
     rec = results[0]
     assert rec.status == "failed"

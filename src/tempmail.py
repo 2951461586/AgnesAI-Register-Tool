@@ -52,9 +52,22 @@ from common import config
 _CODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 _CSS_COLORS = frozenset(
     {
-        "000000", "111111", "222222", "333333", "444444", "555555",
-        "666666", "777777", "888888", "999999", "aaaaaa", "bbbbbb",
-        "cccccc", "dddddd", "eeeeee", "ffffff",
+        "000000",
+        "111111",
+        "222222",
+        "333333",
+        "444444",
+        "555555",
+        "666666",
+        "777777",
+        "888888",
+        "999999",
+        "aaaaaa",
+        "bbbbbb",
+        "cccccc",
+        "dddddd",
+        "eeeeee",
+        "ffffff",
     }
 )
 
@@ -261,9 +274,7 @@ class TempMailClient:
         last = ""
         for attempt in range(config.MAIL_RETRIES + 1):
             try:
-                r = self.session.post(
-                    f"{self.base}/api/mailboxes", json=body, timeout=self.timeout
-                )
+                r = self.session.post(f"{self.base}/api/mailboxes", json=body, timeout=self.timeout)
                 r.raise_for_status()
                 data = r.json()
                 if not data.get("ok"):
@@ -286,9 +297,7 @@ class TempMailClient:
             if attempt >= config.MAIL_RETRIES:
                 break
             time.sleep(min(config.MAIL_POLL_INTERVAL * (attempt + 1), 3.0))
-        raise RuntimeError(
-            f"create_mailbox 连续失败 {config.MAIL_RETRIES + 1} 次（最近：{last}）"
-        )
+        raise RuntimeError(f"create_mailbox 连续失败 {config.MAIL_RETRIES + 1} 次（最近：{last}）")
 
     # ── 邮件读取 ──────────────────────────────────────────────
     def list_mails(self, limit: int | None = None, email: str | None = None) -> list[Mail]:
@@ -394,8 +403,7 @@ class TempMailClient:
             time.sleep(interval)
         if errs:
             self.last_error = (
-                f"邮箱 Worker 持续读不出来（{errs} 次，最近 {last_err}）"
-                f"—— 不是邮件没到，是读不出来"
+                f"邮箱 Worker 持续读不出来（{errs} 次，最近 {last_err}）—— 不是邮件没到，是读不出来"
             )
         return None
 
