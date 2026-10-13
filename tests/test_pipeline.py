@@ -12,6 +12,7 @@
 """
 
 import time
+from typing import cast
 
 import pytest
 
@@ -212,6 +213,66 @@ def test_all_attempts_eaten_by_local_gate_is_skipped_not_mail_timeout(monkeypatc
     assert P.error_kind_of(rec) == P.ERR_QUOTA_GUARD
     assert client.calls == []  # 确认 send_code 根本没被调用
     assert rec.stages["code"] != "failed"  # 不是那个假的“等码超时”
+
+
+def test_register_loop_exhausted_is_not_marked_ok(monkeypatch):
+    """🔴 回归：注册循环的尝试被「换出口」吃光时，**绝不能**标成 ok。
+
+    实测踩到 2 次：`stages['register'] == 'ok(uid=)'`（uid 是空的），然后拿一个
+    **从没注册过**的账号去登录，最后以
+    `登录失败：HTTP 401 Invalid username or password` 收场 —— 报告把原因
+    指向**密码**，与真相（注册请求根本没发出去）恰好相反。
+    """
+    slots = ["s1", "s2"]
+    monkeypatch.setattr(P.config, "REGISTER_MAX_PER_WINDOW", 1)
+    monkeypatch.setattr(P.config, "REGISTER_WINDOW_S", 3600.0)
+    monkeypatch.setattr(P.config, "REGISTER_RETRIES", 1)
+    monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 100)
+    monkeypatch.setattr(P.config, "DOMAIN_WINDOW_S", 1.0)
+
+    pool = SlotPool(list(slots))
+    held = pool.acquire()  # 模拟生产者已占住一个出口
+    # 两个出口的 IP 窗口都打满 ⇒ 每次尝试只能“换出口”，换到循环耗尽
+    for s in slots:
+        P.register_limiter(s).acquire(0)
+
+    client = FakeClient()
+    ticket = P.Ticket(
+        rec=P.AccountRecord(email="a@x.com", password="pw", mail_domain="d.com"),
+        # ⚠ `Ticket.client` 的声明类型是具体的 `AgnesClient`（生产代码的契约），
+        #   而这里注入的是替身 —— `cast` 把"这是测试替身"这个意图写明。
+        client=cast("P.AgnesClient", client),
+        code="123456",
+        proxy=held,
+        domain="d.com",
+    )
+    rec = P.finish(ticket, client_factory=lambda proxy=None: client, slot_pool=pool)
+
+    assert "register" not in client.calls  # 注册请求一次都没发
+    assert rec.stages["register"] == "failed"  # 🔴 不是 "ok(uid=)"
+    assert P.error_kind_of(rec) == P.ERR_QUOTA_GUARD
+    assert rec.status == "failed"  # 码已发出 ⇒ failed，不是 skipped
+    assert rec.stages["login"] == ""  # 没有往下跑
+
+
+def test_register_response_without_user_is_rejected(monkeypatch):
+    """🔴 回归：注册响应缺 `data.user.id`（HTTP 200 的空壳）必须判失败。
+
+    否则会把“没注册”标成“注册成功”，再拿它去登录 —— 那会把原因伪装成
+    `登录失败：401 Invalid username or password`。
+    """
+
+    class EmptyRegisterClient(FakeClient):
+        def register(self, email, password, code):
+            self.calls.append("register")
+            return {"code": 200, "data": {}}
+
+    rec = _run(monkeypatch, client=EmptyRegisterClient())[0]
+    assert rec.status == "failed"
+    assert rec.stages["register"] == "failed"
+    assert P.error_kind_of(rec) == P.ERR_REJECTED
+    assert "data.user" in rec.error
+    assert rec.stages["login"] == ""  # 没往下跑
 
 
 def test_verify_failure_is_non_fatal(monkeypatch):
