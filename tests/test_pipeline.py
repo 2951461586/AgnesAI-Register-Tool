@@ -184,6 +184,31 @@ def test_empty_mailbox_address_is_rejected(monkeypatch):
         assert rec.email == "", bad
 
 
+def test_all_attempts_eaten_by_local_gate_is_skipped_not_mail_timeout(monkeypatch):
+    """🔴 回归：所有尝试都被“换维度”吃掉、**一次码都没发出去**时，
+    绝不能落到 `wait_for_code`。
+
+    实测踩到：10 批里 5 次**假 `rejected`** —— 日志说“等 120s 没等到验证码
+    邮件（打了 113 次收信接口）”，把排查引向“Worker 没收到信 / 域名白名单”，
+    而真相是“本地闸门把每一次尝试都换掉了，一个注册请求都没发”。
+    按项目自己的定义，这必须是 `skipped`（没试过）而不是 `failed`（试过了不行）。
+    """
+    monkeypatch.setattr(P.config, "mail_domains", lambda: ["a.com", "b.com", "c.com"])
+    monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 1)
+    monkeypatch.setattr(P.config, "DOMAIN_WINDOW_S", 3600.0)
+    # 把三个域名的本地窗口都打满 ⇒ 之后每次尝试只能“换域名”，换不动。
+    for d in ("a.com", "b.com", "c.com"):
+        P.domain_limiter(d).acquire(0)
+
+    client = FakeClient()
+    rec = _run(monkeypatch, client=client)[0]
+
+    assert rec.status == "skipped"  # 一个注册请求都没发
+    assert P.error_kind_of(rec) == P.ERR_QUOTA_GUARD
+    assert client.calls == []  # 确认 send_code 根本没被调用
+    assert rec.stages["code"] != "failed"  # 不是那个假的“等码超时”
+
+
 def test_verify_failure_is_non_fatal(monkeypatch):
     _patch_verify(monkeypatch, ok=False, note="auth_failed: HTTP 401")
     monkeypatch.setattr(P.config, "REGISTER_MAX_PER_WINDOW", 100)
