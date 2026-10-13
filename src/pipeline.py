@@ -677,6 +677,25 @@ def provision(
             back = _register_backoff_s()
             log(f"发码被限流，退避 {back:.0f}s 后重试（{ex}）")
             time.sleep(back)
+    else:
+        # 🔴 循环**没有 `break`** 就结束了 ⇒ **一次验证码都没发出去**：
+        #    每一次尝试都被上面的"本地闸门等不起 → 换维度"给 `continue` 掉了
+        #    （IP 窗口与域名窗口都满，换不动）。
+        #
+        #    🔴 这里**绝不能**落到下面的 `wait_for_code`：那会抱着
+        #    `MAIL_POLL_TIMEOUT`（默认 120s）等一封**从来没被请求过**的信，
+        #    最后报 `等码超时`（`rejected`）—— 而真相是"一个注册请求都没发"。
+        #    实测踩到：10 批里 5 次这样的**假 `rejected`**，把排查引向
+        #    "Worker 没收到信 / 域名白名单"，与真实原因（本地闸门）恰好相反。
+        #    项目对这两种状态的区分是硬要求：`skipped` = 没试过，
+        #    `failed` = 试过了不行。
+        #
+        #    抛 `WindowBusy` ⇒ `classify` → `quota_guard` ⇒ 生产者按
+        #    **`skipped`** 记账（且**不**计入配额尝试）—— 与语义一致。
+        raise WindowBusy(
+            f"本地闸门把 {config.REGISTER_RETRIES + 1} 次尝试全部换掉了，"
+            f"一个验证码请求都没发出去（IP / 域名窗口都满）"
+        )
     rec.timings["code_send_ms"] = int((time.time() - t1) * 1000)
     if waited:
         rec.timings["code_wait_send_ms"] = int(waited * 1000)
