@@ -100,7 +100,7 @@ def main(argv=None):
 
     missing = config.validate()
     if missing:
-        print(f"✗ 缺少必需配置：{'、'.join(missing)}", file=sys.stderr)
+        print(f"✗ 配置有问题：{'、'.join(missing)}", file=sys.stderr)
         return 1
     if args.mode == "burst":
         mode_burst(args)
