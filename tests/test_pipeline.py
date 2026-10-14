@@ -376,3 +376,85 @@ def test_window_busy_acquire_without_cap_still_sleeps():
     # 睡完之后窗口应已滑出（那次 acquire 自己占的位也在窗口外），不用再等
     time.sleep(0.35)
     assert win.acquire() == 0.0
+
+
+def test_window_events_persist_across_processes(monkeypatch):
+    """🔴 守卫（P5）：窗口事件必须**跨进程**生效。
+
+    进程内窗口的实际后果：`python run.py --count 1` 连跑两次，第二个进程仍然
+    认为窗口是空的 ⇒ 本地闸门形同不存在 ⇒ 撞服务端墙（台账实测 17 条 `quota`
+    失败，而实际用法正是一天内 24 次短跑）。
+
+    这里用"清空 limiter 字典"模拟一次新的 `run.py` 进程 —— 新进程里那个字典
+    本来就是空的，除此之外没有任何跨进程状态。
+    """
+    monkeypatch.setattr(P.config, "REGISTER_MAX_PER_WINDOW", 1)
+    monkeypatch.setattr(P.config, "REGISTER_WINDOW_S", 3600.0)
+
+    assert P.register_limiter("s1").acquire(0) == 0.0  # 占掉唯一的名额
+    P._REGISTER_LIMITERS.clear()  # ⇐ 模拟进程重启
+    win = P.register_limiter("s1")
+
+    assert win.wait_time() > 3000, "窗口没跨进程生效 —— 新进程又以为窗口是空的"
+    with pytest.raises(P.WindowBusy):
+        win.acquire(max_wait=0.5)  # 没真的睡 1 小时
+    # 另一个出口必须是**独立**的桶（多出口 = 多张窗口，那是吞吐的乘数）
+    assert P.register_limiter("s2").wait_time() == 0.0
+
+
+def test_domain_window_also_persists_across_processes(monkeypatch):
+    """域名维度同样落盘 —— 它是两道闸门里更紧的那一道（实测 13/15 条限流来自它）。"""
+    monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 1)
+    monkeypatch.setattr(P.config, "DOMAIN_WINDOW_S", 3600.0)
+
+    assert P.domain_limiter("a.com").acquire(0) == 0.0
+    P._DOMAIN_LIMITERS.clear()  # ⇐ 模拟进程重启
+
+    assert P.domain_limiter("a.com").wait_time() > 3000
+    assert P.domain_limiter("b.com").wait_time() == 0.0
+
+
+def test_slot_key_never_contains_credentials():
+    """🔴 守卫：窗口存储键**绝不能**含代理账密。
+
+    槽位串是 `scheme://user:pass@host:port`（或 `host:port:user:pass`），直接
+    当键就是把凭据持久化到 `state/register_windows.jsonl` —— `state/` 是
+    gitignore 的，但"不被提交"不等于"不该落盘"。与 `SlotStats.label` 是同一类
+    事故（那边实测把代理密码打进了收尾报告）。
+    """
+    secret = "sup3rs3cret"
+    for raw in (
+        f"http://alice:{secret}@203.0.113.7:8080",
+        f"203.0.113.7:8080:alice:{secret}",
+    ):
+        key = P._slot_key(raw)
+        assert secret not in key, key
+        assert "alice" not in key, key
+        assert "203.0.113.7" in key, key  # host:port 保留（排查要对得上报告）
+
+    # 🔴 同 host:port、不同槽位必须**不同键**：本项目 `.slots.txt` 的 10 个槽位
+    #    恰好是"同 host:port、不同 sid"，只留脱敏串会让它们**塌成一个键**
+    #    ⇒ 10 张窗口变 1 张（吞吐掉 10 倍，而且不报错）。
+    assert P._slot_key("us.example.net:2000:u1:pw") != P._slot_key("us.example.net:2000:u2:pw")
+    # 直连（无槽位）也要有稳定的键
+    assert P._slot_key(None) == P._slot_key("") == "ip:direct"
+
+
+def test_window_state_is_isolated_from_real_state_dir():
+    """🔴 守卫：测试**绝不能**写进真实的 `state/`。
+
+    窗口状态一旦被测试污染，会顺着 `state/register_windows.jsonl` 影响
+    **下一次真实跑批**的闸门 —— 症状是"某个出口莫名被限流"，而原因在两小时前
+    跑的一次测试里（`quota.py` 那边实测踩过同样的坑，见 `conftest.py`）。
+
+    ⚠ 本用例断言的是 `conftest._isolate_state` **真的生效**，而不是断言代码
+      逻辑 —— 它正是那个 fixture 的回归用例。
+    """
+    from src import windowstore
+
+    p = windowstore.state_path().resolve()
+    real = (windowstore.ROOT / "state").resolve()
+    assert not p.is_relative_to(real), (
+        f"窗口状态落到了真实 state/：{p}\n"
+        f"  `conftest.py::_isolate_state` 应该把 AR_WINDOW_STATE 钉在 tmp 目录里。"
+    )
