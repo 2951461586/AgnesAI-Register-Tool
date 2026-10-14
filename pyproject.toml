@@ -76,3 +76,8 @@ ignore = [
 #   2. `sys.stdout = io.TextIOWrapper(...)` 要尽早执行，否则中文/emoji 打不出来
 "tools/**/*.py" = ["E402"]
 "tools/_bootstrap.py" = ["F401"]
+# `src/pipeline/__init__.py` 是**纯转出层**：它 import 进来的名字**就是**它的对外
+# API，本地当然"用不到" ⇒ F401 在这里是噪音。
+# ⚠ 代价：这个文件里**真的**多余的 import 不会被报出来。但"转出漏了"会被用例
+#    直接抓到（`tests/` 会 AttributeError），所以这个代价可以接受。
+"src/pipeline/__init__.py" = ["F401"]
