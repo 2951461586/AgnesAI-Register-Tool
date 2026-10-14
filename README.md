@@ -16,8 +16,8 @@ python run.py --count 6   # 跑 6 个
 
 本项目是 [Intern-Register-Tool] 架构的**第三个同族实现**（继
 [Hark-Register-Tool] 之后），目录与分层刻意保持一致，便于在三者之间迁移经验：
-`common/config.py` + `src/{tempmail,agnes,apikey,pipeline,ledger,quota,report,redact,fsutil,cli}.py`
-+ `run.py` + `docs/` + `tests/` + `tools/`。
+`common/config.py` + `src/{tempmail,agnes,apikey,pipeline,ledger,quota,report,redact,fsutil,cli}.py` +
+`run.py` + `docs/` + `tests/` + `tools/`。
 
 ---
 
@@ -43,7 +43,7 @@ python run.py --quiet                  # 只输出汇总
 | --- | --- | --- |
 | `AR_WORKER_BASE` | ✅ | CF Worker 地址，如 `https://<worker>.<sub>.workers.dev` |
 | `AR_WORKER_ADMIN_TOKEN` | ✅ | Worker 的 Admin Token |
-| `AR_WORKER_DOMAIN` | ✅ | 收信域名（实测**自有域名直接过**，Agnes 没有域名门） |
+| `AR_WORKER_DOMAIN` | ✅ | 收信域名（实测**自有域名不需要报备**，但平台侧有**域名白名单** —— 见 `docs/protocol.md` §2） |
 | `AR_MAIL_DOMAINS` | — | 收信**域名池**（逗号分隔，轮换用）。留空退回 `AR_WORKER_DOMAIN`。**第二个吞吐杠杆**（见下） |
 | `AR_PASSWORD_LEN` | — | 默认 16。服务端硬要求 ≥ 8 |
 | `AR_KEY_NAME` | — | 创建的 API Key 名称，默认 `auto` |
@@ -83,10 +83,12 @@ Agnes 对**注册尝试**（`/api/verification` 与 `/api/user/register`，**共
 * 撞到限流时本工具**先换维度**（IP 撞了就换出口、域名撞了就换域名），
   换不动才退避重试。
 
-⚠ **窗口长度尚未测准**（已知 **>45 分钟** —— 见
-[`docs/protocol.md`](docs/protocol.md)「限流：实测与未测」，那是这条事实的
-**唯一真源**）。所以本地闸门取保守值（默认 **2 次 / 3600s**，= 1 个账号）。
-测准它的方法见 `tools/probes/probe_register_limit.py`。
+⚠ **窗口长度尚未测准** —— 这条事实的唯一真源是
+[`docs/protocol.md`](docs/protocol.md) §3「限流：实测与未测」，
+**本文件刻意不重复那个数字**（同一份知识写两处必然漂移 —— 本项目实际漂移过：
+一处 `>4 分钟`、一处 `>45 分钟`、一处默认 `600s`）。所以本地闸门取保守值
+（默认 `2 次 / 3600s`，= 1 个账号）。测准它的方法见
+`tools/probes/probe_register_limit.py`。
 
 🔴 **域名维度换不动，所以本地必须一次占够两枪**（`src/pipeline.py` 的
 `REQUESTS_PER_ACCOUNT`）。注册时域名已经定死在邮箱里 —— 只留一格就发码，
@@ -144,6 +146,8 @@ src/apikey.py        推理网关侧的 key 可用性校验
 src/pipeline.py      两段式流水线 + 按出口的滑动窗口限速
 src/ledger.py        账号台账（合并 + 防静默缩水）
 src/quota.py         本地配额闸门（爆炸半径上限）
+src/jsonlstore.py    JSONL 状态存储（唯一实现：追加 / 宽容读取 / 原子重写）
+src/windowstore.py   滑动窗口事件（**跳进程持久化**）
 src/proxypool.py     槽位代理池
 src/report.py        收尾报告（纯展示，依赖注入）
 src/{redact,fsutil,cli}.py  脱敏 / 原子写盘 / CLI 共用骨架
@@ -173,18 +177,20 @@ python tools/data/export_keys.py             # 导出 sk- key 列表
 | 1 | 本批**全部失败** |
 | 2 | 本地配额闸门拦下（**未发出任何请求**） |
 | 3 | 台账防静默缩水护栏触发（拒绝写盘） |
-| 4 | 缺少必需配置 |
+| 4 | 配置有问题（缺凭据 / 值不合法，如窗口上限装不下一个账号） |
 | 5 | 内部错误（记录序列化失败） |
 
 ---
 
 ## 已知限制
 
-* **限流窗口未测准** —— 默认值是保守估计，不是服务端阈值（已知 >45 分钟，见 `docs/protocol.md`）。
+* **限流窗口未测准** —— 默认值是保守估计，不是服务端阈值（实测下界见
+  `docs/protocol.md` §3，那是唯一真源）。
 * **单出口 / 单域名吞吐有限**：两个杠杆（`AR_PROXY_SLOTS` + `AR_MAIL_DOMAINS`）
   不一起配时，批量会被同一张 IP 或域名窗口卡住。
-* **邮箱源只有 CF Worker 一个** —— Agnes 没有域名门，不需要可插拔抽象；
-  但要换源得改 `src/tempmail.py`。
+* **邮箱源只有 CF Worker 一个** —— 自有域名不需要报备（没有 OpenXLab 那种
+  `A0232` 域名门），但**平台侧有一道域名白名单**（可用/被拒的清单见
+  `docs/protocol.md` §2）；要换源得改 `src/tempmail.py`。
 * **不处理找回密码 / 二次验证** —— 临时邮箱收不到找回信，台账丢了就是丢了。
 * 本工具仅供学习与自用；请遵守 Agnes 的服务条款。
 

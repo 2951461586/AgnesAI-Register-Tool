@@ -8,6 +8,7 @@
     apikey.py     推理网关侧的 API Key 可用性校验（/v1/models + /v1/chat/completions）
     pipeline.py   两段式流水线（生产者：建邮箱→发验证码→等码；
                   消费者：注册→登录→建 Key→只读校验；末尾并行校验 Key）
+    proxypool.py  槽位代理池（多出口 = 多张 IP 窗口；**最少使用优先**）
     ledger.py     账号台账（合并而不是覆盖；防静默缩水护栏）
     quota.py      本地注册配额保护（爆炸半径上限，不是服务端权威计量）
     jsonlstore.py JSONL 状态存储（**唯一实现**：追加 / 宽容读取 / 原子重写）
