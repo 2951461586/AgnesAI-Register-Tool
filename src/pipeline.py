@@ -45,6 +45,7 @@ Agnes 实测有一层**按 IP 的注册尝试限流**，覆盖 `/api/verificatio
 错误文案里也可能出现服务端的词，文本匹配分不清"服务端说的"和"我们引用的"。
 """
 
+import hashlib
 import json
 import queue
 import secrets
@@ -58,6 +59,7 @@ from common import config
 
 from . import apikey as _apikey
 from . import quota as _quota
+from . import windowstore as _windows
 from .agnes import (
     ERR_MAIL,
     ERR_NETWORK,
@@ -72,6 +74,7 @@ from .agnes import (
     access_token_of,
 )
 from .proxypool import SlotPool, SlotPoolEmpty
+from .redact import redact_url
 from .tempmail import TempMailClient, now_ms
 
 __all__ = [
@@ -380,13 +383,32 @@ class SlidingWindow:
     🔴 用**滑动窗口**而不是"最小间隔"：平台限的是"窗口内最多 N 次"，
       不是"每 X 秒一次"。用固定间隔时，只要有一次请求比预期快，
       就可能把第 N+1 次挤进窗口而撞限流。滑动窗口不会出现这种偏差。
+
+    🔴 窗口事件**落盘**（`windowstore`），`key` 非空时生效。
+      为什么必须落盘：本工具的实际用法是**一天内多次短跑**，而进程内的
+      窗口每次启动即清零 ⇒ 本地闸门形同不存在（实测后果：17 条撞服务端墙的
+      `quota` 失败）。`key=None` 保留纯内存语义（测试 / 不需要持久化的场景）。
     """
 
-    def __init__(self, max_events: int, window_s: float):
+    def __init__(self, max_events: int, window_s: float, *, key: str | None = None):
         self.max_events = max(1, int(max_events))
         self.window_s = float(window_s)
+        # 空串 = 纯内存。**不落盘**（`windowstore` 对键的内容不作假设，
+        # 但"没有键"这件事必须在这里就被翻译成"不写文件"）。
+        self.key = key or ""
         self._times: list[float] = []
         self._lock = threading.Lock()
+
+    def _events(self, now: float) -> list[float]:
+        """窗口内的事件（**升序**）。`key` 为空 ⇒ 进程内内存。
+
+        🔴 每次都**重新读**（而不是构造时读一次）：另一个进程可能刚写了新事件，
+          而"看不到别人的事件"正是这次要修的那个缺陷。
+        """
+        if not self.key:
+            self._times = [t for t in self._times if now - t < self.window_s]
+            return self._times
+        return _windows.events(self.key, self.window_s, now)
 
     def acquire(self, max_wait: float | None = None) -> float:
         """等到可以发一个请求为止，返回**实际等了多久**（秒）。
@@ -402,10 +424,10 @@ class SlidingWindow:
         """
         with self._lock:
             now = time.time()
-            self._times = [t for t in self._times if now - t < self.window_s]
+            times = self._events(now)
             wait = 0.0
-            if len(self._times) >= self.max_events:
-                wait = (self._times[0] + self.window_s) - now
+            if len(times) >= self.max_events:
+                wait = (times[0] + self.window_s) - now
                 if wait > 0:
                     if max_wait is not None and wait > max_wait:
                         raise WindowBusy(
@@ -413,9 +435,15 @@ class SlidingWindow:
                             wait_s=wait,
                         )
                     time.sleep(wait)
+                # ⚠ 睡完必须**重新取时间与事件**：`now` 变了，而且睡着的这段时间
+                #   里别的线程/进程可能又占掉了名额（后者只在落盘模式下可见）。
                 now = time.time()
-                self._times = [t for t in self._times if now - t < self.window_s]
-            self._times.append(now)
+                times = self._events(now)
+            if self.key:
+                _windows.record(self.key, now)
+            else:
+                times.append(now)
+                self._times = times
             return max(0.0, wait)
 
     def wait_time(self) -> float:
@@ -428,10 +456,10 @@ class SlidingWindow:
         """
         with self._lock:
             now = time.time()
-            self._times = [t for t in self._times if now - t < self.window_s]
-            if len(self._times) < self.max_events:
+            times = self._events(now)
+            if len(times) < self.max_events:
                 return 0.0
-            return max(0.0, (self._times[0] + self.window_s) - now)
+            return max(0.0, (times[0] + self.window_s) - now)
 
 
 class WindowBusy(Exception):
@@ -457,10 +485,37 @@ class WindowBusy(Exception):
 #      · `register_limiter(slot)` —— IP 维度，按出口分桶（多出口 = 多张窗口）
 #      · `domain_limiter(domain)` —— 域名维度，**全局**分桶（多域名 = 多张窗口）
 #    只配一个就会从另一个维度撞服务端。
+#
+# 🔴 两张窗口的事件都**落盘**（`windowstore`），因为进程内的窗口每次启动即清零
+#    —— 而本工具的实际用法是一天内多次短跑（台账实测 24 次）。
 _REGISTER_LIMITERS: dict = {}
 _DOMAIN_LIMITERS: dict = {}
 _DOMAIN_USED: dict = {}
 _LIMITER_LOCK = threading.Lock()
+
+
+def _slot_key(slot: str | None) -> str:
+    """槽位 → 窗口存储键。**绝不能把代理串原样写进 `state/`**。
+
+    🔴 槽位串是 `scheme://user:pass@host:port`（或 `host:port:user:pass`），
+      直接当键就是把**代理账密**持久化到磁盘。`state/` 虽在 `.gitignore` 中，
+      但那是"不被提交"，不是"不该落盘" —— 与 `SlotStats.label` 是同一类事故
+      （那边实测把密码打进了收尾报告）。
+
+    形态 `ip:<脱敏 host:port>#<短哈希>`，两个部分都必需：
+      · 保留 `host:port` —— 排查时能对上报告里的槽位标签；
+      · 末尾哈希区分**同 host:port 的不同槽位** —— 本项目 `.slots.txt` 的 10 个
+        槽位恰好是"同 host:port、不同 sid"，只留脱敏串会让它们**塌成一个键**，
+        于是 10 张窗口变成 1 张（吞吐掉 10 倍，而且**不报错**）。
+    """
+    if not slot:
+        return "ip:direct"
+    shown = redact_url(slot)
+    # `host:port:user:pass` → `host:port:***:***`；`http://u:p@h:port` → `http://***@h:port`
+    hostpart = shown.split("://", 1)[-1].split("@")[-1]
+    hostport = ":".join(hostpart.split(":")[:2]) or hostpart
+    digest = hashlib.sha256(slot.encode("utf-8")).hexdigest()[:8]
+    return f"ip:{hostport}#{digest}"
 
 
 def register_limiter(slot: str | None = None) -> SlidingWindow:
@@ -469,7 +524,11 @@ def register_limiter(slot: str | None = None) -> SlidingWindow:
     with _LIMITER_LOCK:
         lim = _REGISTER_LIMITERS.get(key)
         if lim is None:
-            lim = SlidingWindow(config.REGISTER_MAX_PER_WINDOW, config.REGISTER_WINDOW_S)
+            lim = SlidingWindow(
+                config.REGISTER_MAX_PER_WINDOW,
+                config.REGISTER_WINDOW_S,
+                key=_slot_key(slot),
+            )
             _REGISTER_LIMITERS[key] = lim
         return lim
 
@@ -485,7 +544,13 @@ def domain_limiter(domain: str) -> SlidingWindow:
     with _LIMITER_LOCK:
         lim = _DOMAIN_LIMITERS.get(key)
         if lim is None:
-            lim = SlidingWindow(config.DOMAIN_MAX_PER_WINDOW, config.DOMAIN_WINDOW_S)
+            # ⚠ 域名进键是安全的（它不是凭据，台账里的 `mail_domain` 本就是明文）；
+            #   出口才需要 `_slot_key()` 脱敏。
+            lim = SlidingWindow(
+                config.DOMAIN_MAX_PER_WINDOW,
+                config.DOMAIN_WINDOW_S,
+                key=f"domain:{key}",
+            )
             _DOMAIN_LIMITERS[key] = lim
         return lim
 

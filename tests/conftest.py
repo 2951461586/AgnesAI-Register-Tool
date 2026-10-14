@@ -1,9 +1,9 @@
 """共享夹具。
 
-🔴 **隔离本地状态**：`quota.state_path()` 在**调用时**读 `AR_QUOTA_STATE`，
-   所以这里 setenv 就能把计数文件钉在 tmp 目录里 —— 不这么做的话，
-   跑一次测试就会往真实 `state/register_quota.jsonl` 里写记录，
-   而那个文件会影响**下一次真实跑批**的闸门（实测踩过：测试把额度吃掉）。
+🔴 **隔离本地状态**：`quota.state_path()` 与 `windowstore.state_path()` 都在
+   **调用时**读各自的环境变量，所以这里 setenv 就能把两个状态文件钉在 tmp 目录里
+   —— 不这么做的话，跑一次测试就会往真实 `state/` 里写记录，而那两个文件会影响
+   **下一次真实跑批**的闸门（实测踩过：测试把额度吃掉）。
 """
 
 import pytest
@@ -12,6 +12,10 @@ import pytest
 @pytest.fixture(autouse=True)
 def _isolate_state(tmp_path, monkeypatch):
     monkeypatch.setenv("AR_QUOTA_STATE", str(tmp_path / "register_quota.jsonl"))
+    # 🔴 滑动窗口的事件现在**落盘**了（`src/windowstore.py`），所以它也必须隔离：
+    #    不隔离的话，一个用例占掉的名额会顺着真实 `state/register_windows.jsonl`
+    #    漏给下一个用例（甚至漏给真实的 `run.py`），而症状是"某个用例莫名被限流"。
+    monkeypatch.setenv("AR_WINDOW_STATE", str(tmp_path / "register_windows.jsonl"))
     from src import pipeline
 
     # 🔴 域名维度的窗口也要隔离，理由与下面清字典一样：两个 limiter 字典都是

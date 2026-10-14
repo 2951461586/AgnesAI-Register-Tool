@@ -145,7 +145,9 @@ def _risky_loops():
 
 def test_retry_loops_must_have_else_clause():
     offenders = [
-        f"{rel}:{line} in {fn}()" for rel, fn, line in _risky_loops() if (rel, fn) not in LOOP_ALLOWED
+        f"{rel}:{line} in {fn}()"
+        for rel, fn, line in _risky_loops()
+        if (rel, fn) not in LOOP_ALLOWED
     ]
     assert not offenders, (
         "这些循环用 `continue` 消耗尝试、用 break/return 表示成功，但**耗尽后会落到"
@@ -174,6 +176,14 @@ EXCEPT_ALLOWED = {
         "`fsutil` 的 docstring 与 `quota._read_entries` 自己的注释里。"
         "⚠ 与之相对，**台账**那一侧的读源必须抛（见 `load_read_source`）。"
     ),
+    ("src/windowstore.py", "_read_entries", "ValueError"): (
+        "与上面 `quota._read_entries` **完全同构**：滑动窗口的事件文件是 JSONL，"
+        "半截行（写盘时被杀 / 被人手改）只丢那一行。窗口状态与配额计数一样是"
+        "**加速器不是数据** —— 丢一行的后果是闸门**偏松**（下一轮可能撞服务端墙），"
+        "而让它抛的后果是**整批任务起不来**。两害相权取轻，且偏松那一侧与"
+        "`_read_entries` 文件读不出来时返回 `[]` 是同一套降级策略。"
+        "⚠ 与之相对，**台账**那一侧的读源必须抛（见 `load_read_source`）。"
+    ),
 }
 
 
@@ -193,7 +203,11 @@ def _swallowing_handlers():
 
 
 def test_swallowing_except_handlers_are_allowlisted():
-    offenders = [f"{rel}::{fn} except {typ}" for rel, fn, typ in _swallowing_handlers() if (rel, fn, typ) not in EXCEPT_ALLOWED]
+    offenders = [
+        f"{rel}::{fn} except {typ}"
+        for rel, fn, typ in _swallowing_handlers()
+        if (rel, fn, typ) not in EXCEPT_ALLOWED
+    ]
     assert not offenders, (
         "这些 `except` 把异常整个吃掉（体里只有 pass / continue），既不留痕也不上报：\n  "
         + "\n  ".join(offenders)
@@ -231,7 +245,9 @@ def test_merge_basis_is_read_strictly():
     calls = [
         n
         for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "merge_records"
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "merge_records"
     ]
     assert calls, "run.py 里找不到 merge_records 调用 —— 本用例的前提变了，请重看"
     for call in calls:
@@ -271,7 +287,9 @@ def test_lenient_reader_is_not_used_on_the_write_path():
     bad = [
         n.lineno
         for n in ast.walk(tree)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "load_existing"
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "load_existing"
     ]
     assert not bad, (
         f"run.py 在 {bad} 处调用了 `load_existing`（宽容读取器）。"
