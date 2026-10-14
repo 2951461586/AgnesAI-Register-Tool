@@ -4,6 +4,8 @@
 **小规模运行覆盖掉整个台账**。判据是"字段只增不减"与"不让失败盖掉成功"。
 """
 
+import pytest
+
 from src import ledger as L
 
 
@@ -53,8 +55,6 @@ def test_same_rank_union_keeps_old_fields():
 
 
 def test_shrink_guard_refuses(tmp_path):
-    import pytest
-
     p = tmp_path / "accounts.json"
     with pytest.raises(ValueError):
         L.save(p, [{"email": "a@x.com"}], existing=[{"email": "a@x.com"}, {"email": "b@x.com"}])
@@ -91,3 +91,45 @@ def test_load_existing_tolerates_garbage(tmp_path):
     p.write_text('{"a":1}', encoding="utf-8")
     assert L.load_existing(p) == []
     assert L.load_existing(tmp_path / "missing.json") == []
+
+
+# ── 读源：**损坏就抛**，绝不静默降级成"空台账" ──────────────────
+#
+# 🔴 这是本会话普查出的最严重一条。`load_existing` 的"宽容"对只读用途是对的，
+#    但拿它当**合并的基准**会出事：静默返回 `[]` ⇒ `merged = 本批` ⇒ 写回一份
+#    只剩本批的快照 ⇒ 历史账号永久丢失，而退出码是 0、报告全绿、
+#    连「结果合并：原有 N 条」那行都不打（`kept=0` 时它不打）。
+#    实测：50 条的读源被截断 ⇒ 写回 1 条，全程无告警。
+
+
+def test_read_source_refuses_corrupt_instead_of_silently_empty(tmp_path):
+    p = tmp_path / "accounts-x.json"
+    p.write_text('[{"email": "a@x.com"}, {"email"', encoding="utf-8")  # 截断
+    with pytest.raises(L.LedgerCorrupt):
+        L.load_read_source(p)
+    # "宽容"的那个仍然宽容 —— 它服务的是**只读**用途（导出 key / 复核账号）
+    assert L.load_existing(p) == []
+
+
+def test_read_source_rejects_non_list(tmp_path):
+    p = tmp_path / "x.json"
+    p.write_text('{"a": 1}', encoding="utf-8")
+    with pytest.raises(L.LedgerCorrupt):
+        L.load_read_source(p)
+    assert L.load_existing(p) == []
+
+
+def test_read_source_treats_missing_file_as_empty_ledger(tmp_path):
+    """⚠ 与"损坏"严格区分：文件不存在 = 全新台账，空是**正确**答案。
+
+    `ledger_path()` 在没有任何快照时返回一个永不存在的占位路径 —— 若这里
+    也抛错，全新仓库第一次跑就起不来了。
+    """
+    assert L.load_read_source(tmp_path / "missing.json") == []
+
+
+def test_read_source_returns_records_for_valid_file(tmp_path):
+    p = tmp_path / "x.json"
+    p.write_text('[{"email": "a@x.com"}, 42]', encoding="utf-8")
+    # 非 dict 的元素被丢弃（与 load_existing 同一条过滤规则）
+    assert L.load_read_source(p) == [{"email": "a@x.com"}]

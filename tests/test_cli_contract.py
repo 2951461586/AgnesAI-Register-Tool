@@ -11,6 +11,8 @@ import ast
 import inspect
 from pathlib import Path
 
+import pytest
+
 from src import report as R
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,3 +80,31 @@ def test_report_renders_with_injected_stubs():
     assert "成功 1 / 1" in text
     assert "sk-1234567890abcdefghij" not in text  # key 必须打码
     assert "sk-123456…ghij" in text
+
+
+def test_corrupt_read_source_fails_before_any_request(tmp_path, monkeypatch):
+    """🔴 回归：读源损坏必须在**启动阶段**就退出（码 3），不能等跑完一批才发现。
+
+    这个工具最贵的资源是**服务端的注册窗口** —— 跑完 5 次尝试再告诉你
+    "台账读不出来"，等于白烧一批。所以读源在 `main()` 开头就读好
+    （`load_read_source`，损坏就抛）。
+
+    ⚠ 与"静默抹账"是同一件事的两面：损坏时若不报错，`merged` 会退化成
+      "只剩本批"，历史账号被静默丢光（见 `ledger.load_read_source`）。
+    """
+    import run
+    from common import config
+    from src import ledger as L
+
+    monkeypatch.setattr(L, "LEDGER_DIR", tmp_path / "ledger")
+    runs = L.LEDGER_DIR / "runs" / "2026-10-14"
+    runs.mkdir(parents=True)
+    # 半截 JSON —— 模拟写盘时被杀 / 外部损坏
+    (runs / "accounts-20261014-000000.json").write_text(
+        '[{"email":"a@x.com"},', encoding="utf-8"
+    )
+    monkeypatch.setattr(config, "validate", lambda: [])
+    # 只要它走到 run_batch 就会发**真请求** —— 用哨兵把那条路炸出来
+    monkeypatch.setattr(run, "run_batch", lambda **kw: pytest.fail("读源损坏时不该跑批！"))
+
+    assert run.main(["--count", "1"]) == 3

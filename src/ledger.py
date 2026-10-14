@@ -131,7 +131,19 @@ def load_existing(path) -> list[dict]:
     """读现有台账。文件缺失 / 损坏 / 不是 list 都返回 `[]`，不抛异常。
 
     刻意不抛：一个坏掉的结果文件不该让整次运行失败 —— 那是"清理一次数据
-    反而连活都干不了"。真正的护栏在 `save()` 的条数检查上。
+    反而连活都干不了"。
+
+    🔴 **这个"宽容"只对只读用途成立**（导出 key、复核账号）—— 那些场景下
+      "读不出来" 与 "没有数据" 的后果一样。
+
+    🔴 **绝对不要拿它当「合并的基准」**：损坏时它静默返回 `[]`，而上层
+      「读基准 → 合并 → 写回」的流程会把**历史账号全部抹掉**，且不报错。
+      实测：50 条的读源被截断 ⇒ 写回 1 条，退出码 0、报告全绿。
+      那种场景必须用 `load_read_source()`。
+
+    ⚠ 旧版 docstring 在这里写着"真正的护栏在 `save()` 的条数检查上" ——
+      **那是错的**：`save()` 比的是 `len(records) < len(existing)`，而调用方
+      传的是**合并后**的全量，`merged` 永远 ≥ 历史 ⇒ 护栏恒不触发。
     """
     p = Path(path)
     if not p.is_file():
@@ -141,6 +153,58 @@ def load_existing(path) -> list[dict]:
     except (ValueError, OSError):
         return []
     return [r for r in d if isinstance(r, dict)] if isinstance(d, list) else []
+
+
+class LedgerCorrupt(RuntimeError):
+    """读源存在但读不出来 —— **绝不静默降级成「空台账」**。"""
+
+
+def load_read_source(path) -> list[dict]:
+    """读**台账读源**（合并的基准）。🔴 与 `load_existing` 的关键差别：**损坏就抛**。
+
+    为什么必须抛
+    ------------
+    `run.py` 的流程是「读读源 → 合并 → 写回」。若读源损坏时按 `load_existing`
+    那样静默返回 `[]`：
+
+        existing = []                                     # 损坏 ⇒ 静默变空
+        merged   = merge_records([], new_records)         # = 本批
+        save(snap, merged, existing=None)                 # 护栏此时是关的
+
+    ⇒ 新快照只剩本批那几条，**历史账号永久丢失**（密码只存在于台账里，
+      邮箱是临时邮箱收不到找回信），而退出码是 **0**、报告全绿、
+      连「结果合并：原有 N 条」那行都不会打（`kept=0` 时它不打）。
+    实测：50 条的读源被截断 ⇒ 写回 1 条，全程无告警。
+
+    🔴 而 `save()` 的防缩水护栏在这条路上**帮不上忙**：它比的是
+      `len(records) < len(existing)`，而调用方传的是**合并后**的全量 ——
+      正常情况下 `merged` 永远 ≥ 历史，所以护栏恒不触发。护栏真正拦的是
+      "把本批当全量写"（`--overwrite` 那条路）。换句话说：
+      **读源损坏这条路上护栏是关着的，唯一的机会就是在这里抛。**
+
+    ⚠ 与"文件不存在"严格区分：没有任何快照 = 全新台账，返回 `[]` 是**正确**的
+      （`ledger_path()` 会返回一个永不存在的占位路径）。只有"文件在、但读不出来"
+      才是错误。
+    """
+    p = Path(path)
+    if not p.is_file():
+        return []  # 全新台账（或 `--out` 指向还没写的文件）：空是正确答案
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError as ex:
+        raise LedgerCorrupt(f"台账读源读不出来：{p}（{type(ex).__name__}: {ex}）") from ex
+    try:
+        d = json.loads(raw)
+    except ValueError as ex:
+        raise LedgerCorrupt(
+            f"台账读源不是合法 JSON：{p}（{ex}）\n"
+            f"  🔴 **不要删掉它再重跑** —— 那会让本次运行把台账从零重建。\n"
+            f"  修法：从 backups/ 或 runs/ 里更早的一份快照恢复，"
+            f"或确认这份文件确实该弃用。"
+        ) from ex
+    if not isinstance(d, list):
+        raise LedgerCorrupt(f"台账读源不是 list：{p}（实际是 {type(d).__name__}）")
+    return [r for r in d if isinstance(r, dict)]
 
 
 def merge_records(existing: list[dict], new: list[dict]):
