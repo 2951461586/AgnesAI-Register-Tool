@@ -79,6 +79,15 @@ LOOP_ALLOWED = {
         "「邮箱读不出来」，否则报「邮件没到」—— 两者的修法完全不同。"
         "内层 `for m in mails` 同理：没匹配到 = 本轮没有 ⇒ sleep 后再轮。"
     ),
+    ("src/catchmail.py", "wait_for_mail"): (
+        "与 `src/tempmail.py::wait_for_mail` **完全同构**（那是本模块的模板）："
+        "`while time.time() < deadline` 耗尽 = **等超时**，返回值 `None` 就是它的"
+        "正常出口之一。循环后那段是**分类**而不是降级：`errs` / `last_err` 非空"
+        "⇒ `last_error` 置位 ⇒ 调用方报「邮箱读不出来」，否则报「邮件没到」"
+        "—— 两者修法完全不同。\n"
+        "    ⚠ 两个源共用同一套语义是**有意的**：`provision` 靠 `last_error` 是否"
+        "为空来分流，两个源给出不同的语义会让那个分流变成碰运气。"
+    ),
 }
 
 

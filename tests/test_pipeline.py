@@ -109,7 +109,7 @@ def _run(monkeypatch, **kw):
         producers=1,
         workers=1,
         verbose=False,
-        mail_factory=lambda: mail,
+        mail_factory=lambda domain=None: mail,
         client_factory=lambda proxy=None: client,
         slot_pool=SlotPool([]),
         **kw,
@@ -289,7 +289,7 @@ def test_verify_failure_is_non_fatal(monkeypatch):
         producers=1,
         workers=1,
         verbose=False,
-        mail_factory=lambda: FakeMail(),
+        mail_factory=lambda domain=None: FakeMail(),
         client_factory=lambda proxy=None: FakeClient(),
         slot_pool=SlotPool([]),
     )
@@ -614,7 +614,7 @@ def test_concurrent_producers_cannot_burn_codes(monkeypatch):
         producers=2,
         workers=1,
         verbose=False,
-        mail_factory=lambda: BarrierMail(),
+        mail_factory=lambda domain=None: BarrierMail(),
         client_factory=factory,
         slot_pool=SlotPool([]),
     )

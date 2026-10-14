@@ -32,7 +32,7 @@ from .record import Ticket, _print, make_password
 def provision(
     ticket: Ticket,
     *,
-    mail,
+    mail_for,
     mail_domain: str | None = None,
     slot_pool=None,
     client_factory=None,
@@ -43,6 +43,12 @@ def provision(
     ⚠ 这里**不捕获异常**，是有意的：异常类型带着 `error_kind` 的分类信息，
       在这一层吞掉就得在这一层重新分类（= 第二份分类实现）。让调用方统一
       用 `classify()` 处理。
+
+    🔴 `mail_for(domain)` 是**按域名取邮箱客户端**的可调用对象，而不是一个
+      现成的客户端：域名来自**多个源**（自有 CF Worker / catchmail），而两者
+      的协议完全不同（一个要 `X-Admin-Token`、一个要 `Referer`/`Origin`）。
+      所以客户端必须**跟着域名走** —— 换域名时重新取一个，否则会拿 Worker
+      的客户端去 catchmail 的域名上建地址。
     """
     rec = ticket.rec
     client_factory = client_factory or (lambda proxy=None: AgnesClient(proxy=proxy))
@@ -136,6 +142,8 @@ def provision(
             raise
 
         # ── 建邮箱（每次重试都新建：换域名就得换地址）──────────────
+        # 🔴 客户端**跟着域名取**：域名可能刚从另一个源换过来。
+        mail = mail_for(domain)
         rec.enter("mailbox")
         emails = mail.create_mailbox(domain, 1)
         # 🔴 必须校验**元素**，不能只查 `if not emails`。
@@ -151,7 +159,8 @@ def provision(
         address = first.strip() if isinstance(first, str) else ""
         if not address:
             raise AgnesRejected(
-                f"邮箱 Worker 没返回有效地址（create_mailbox 返回 {emails!r}）",
+                f"邮箱源没返回有效地址（{config.source_of(domain)} 的 create_mailbox "
+                f"返回 {emails!r}）",
                 code="NO_MAILBOX",
             )
         rec.email = address

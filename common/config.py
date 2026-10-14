@@ -124,6 +124,33 @@ WORKER_DOMAIN = os.getenv("AR_WORKER_DOMAIN", "").strip()
 # 换域名池之前先跑 `tools/probes/probe_domains.py`（⚠ 消耗注册窗口）。
 MAIL_DOMAINS = [d.strip() for d in os.getenv("AR_MAIL_DOMAINS", "").split(",") if d.strip()]
 
+# ── 邮箱源（**多源**）────────────────────────────────────────────
+# 🔴 为什么要"源"这一层：服务端的注册限流有一道**按收信域名**的窗口，
+#    所以"有多少个可用域名"直接决定每小时能跑几个账号。而**单个源能提供的
+#    域名数有限**（自有域名只有 4 个可用）⇒ 第二个源是**唯一能加域名窗口**的
+#    手段（实测：catchmail 一家就给 3 个）。
+#
+# 取值：`worker`（自有 CF Worker 域名）/ `catchmail`（公共临时邮箱，免鉴权）。
+# ⚠ **默认只有 `worker`** —— 换源是**显式动作**（与 Intern 那边的约定一致：
+#   别名/隐式回退会让"我只改了 X"变成"顺手把 Y 也改了"）。
+MAIL_SOURCES = [
+    s.strip().lower() for s in os.getenv("AR_MAIL_SOURCES", "worker").split(",") if s.strip()
+]
+# 唯一真源：`validate()` / `lint()` 与 `mailbox.py` 的工厂都从这里取 ——
+# 避免"校验认得的取值"和"工厂认得的取值"各写一份然后漂移。
+MAIL_SOURCE_KINDS = ("worker", "catchmail")
+
+# catchmail 的域名。实测（2026-10-14）：3 个**全部过 Agnes 白名单**，
+# 且端到端可用（建址→发码→**2s 收到验证码**）。可用 `AR_CATCHMAIL_DOMAINS` 覆盖。
+#
+# 🔴 与自有域名的**关键差别**：这些是**公共**域名 —— 任何人都能在上面建地址
+#    ⇒ 那个域名的服务端窗口**与陌生人共享**，可能被别人的量打满且**不可控**。
+#    （同类项目记过 `Mail.tm` 的公共域名 `uberip.com` "周期性被封"。）
+#    ⇒ 定位是**补充窗口**，不是替代自有域名。
+CATCHMAIL_DOMAINS = [
+    d.strip() for d in os.getenv("AR_CATCHMAIL_DOMAINS", "").split(",") if d.strip()
+] or ["catchmail.io", "mailistry.com", "zeppost.com"]
+
 # ── Agnes 站点 ────────────────────────────────────────────────────
 # 🔴 **两个域名**：业务 API 在 `platform-backend.agnes-ai.com`，
 #    而浏览器里的页面在 `platform.agnes-ai.com`（Origin / Referer 要指它）。
@@ -376,12 +403,25 @@ def validate() -> list[str]:
     由入口显式调用，报错时直接给出修法。
     """
     missing = []
-    if not WORKER_ADMIN_TOKEN:
-        missing.append("AR_WORKER_ADMIN_TOKEN")
-    if not WORKER_BASE:
-        missing.append("AR_WORKER_BASE")
-    if not WORKER_DOMAIN:
-        missing.append("AR_WORKER_DOMAIN")
+    # ⚠ 凭据检查**按启用的源**来：只开 `catchmail` 时不需要 Worker 的三项
+    #   （它免鉴权）—— 无条件要求它们会让人以为"必须填"，而那是假话。
+    if "worker" in MAIL_SOURCES:
+        if not WORKER_ADMIN_TOKEN:
+            missing.append("AR_WORKER_ADMIN_TOKEN")
+        if not WORKER_BASE:
+            missing.append("AR_WORKER_BASE")
+        if not WORKER_DOMAIN:
+            missing.append("AR_WORKER_DOMAIN")
+    # 源名写错是配置错误，且**必须**报出来：`source_of()` 对未知域名一律
+    # 回落到 `worker`，所以一个拼错的源名会静默变成"用 Worker"。
+    unknown = [s for s in MAIL_SOURCES if s not in MAIL_SOURCE_KINDS]
+    if unknown:
+        missing.append(
+            f"AR_MAIL_SOURCES（未知取值 {unknown}，只认 {' / '.join(MAIL_SOURCE_KINDS)}）"
+        )
+    # 一个域名都没有 ⇒ 一个账号都跑不出来（`provision` 会抛 NO_DOMAIN）。
+    if not mail_domains():
+        missing.append("AR_MAIL_SOURCES / AR_MAIL_DOMAINS（没有任何可用收信域名）")
     # 槽位文件读不到是配置错误，但用"缺项"的形式报出来比抛 traceback 可读得多。
     try:
         proxy_slots()
@@ -446,11 +486,31 @@ def lint() -> list[str]:
 
 
 def mail_domains() -> list[str]:
-    """可用的收信域名列表（**唯一真源**）。
+    """**所有启用源**的可用收信域名（**唯一真源**）。
 
-    优先级：`AR_MAIL_DOMAINS` > `AR_WORKER_DOMAIN`。
-    两者都空时返回空列表 —— 由 `validate()` 在入口报错，而不是在这里抛。
+    优先级（`worker` 源内部）：`AR_MAIL_DOMAINS` > `AR_WORKER_DOMAIN`。
+    `catchmail` 源额外贡献 `AR_CATCHMAIL_DOMAINS`（默认 3 个）。
+
+    ⚠ 两者都空时返回空列表 —— 由 `validate()` 在入口报错，而不是在这里抛。
     """
-    if MAIL_DOMAINS:
-        return list(MAIL_DOMAINS)
-    return [WORKER_DOMAIN] if WORKER_DOMAIN else []
+    out: list[str] = []
+    if "worker" in MAIL_SOURCES:
+        out += MAIL_DOMAINS or ([WORKER_DOMAIN] if WORKER_DOMAIN else [])
+    if "catchmail" in MAIL_SOURCES:
+        out += CATCHMAIL_DOMAINS
+    # 去重但保序（同一个域名可能被两个源都列到）
+    seen: set[str] = set()
+    return [d for d in out if not (d.lower() in seen or seen.add(d.lower()))]
+
+
+def source_of(domain: str) -> str:
+    """域名 → 邮箱源名（`worker` / `catchmail`）。
+
+    🔴 这是"**域名决定源**"这条规则的**唯一实现**：`provision` 拿到域名后靠它
+      决定用哪个客户端。写两处必然漂移，而漂移的形态是"拿 Worker 的客户端去
+      catchmail 的域名上建地址" —— 报错会指向一个不存在的问题。
+    """
+    d = (domain or "").strip().lower()
+    if d and d in {x.lower() for x in CATCHMAIL_DOMAINS}:
+        return "catchmail"
+    return "worker"
