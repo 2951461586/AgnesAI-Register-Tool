@@ -44,7 +44,9 @@ def check_one(rec: dict) -> dict:
                     me = c.user_self()
                     note.append(f"active={bool(me.get('is_active', True))}")
                     bal = c.balance()
-                    out["balance_minor"] = bal.get("available_total_minor", out.get("balance_minor"))
+                    out["balance_minor"] = bal.get(
+                        "available_total_minor", out.get("balance_minor")
+                    )
                 except AgnesError as ex:
                     note.append(f"self=fail({ex})")
             else:

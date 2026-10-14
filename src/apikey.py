@@ -59,12 +59,18 @@ def list_models(key: str, *, timeout: float | None = None) -> list[str]:
         raise KeyVerifyError(f"{type(ex).__name__}: {ex}", kind=V_NETWORK) from ex
     if r.status_code in (401, 403):
         raise KeyVerifyError(
-            f"HTTP {r.status_code}：网关拒绝这把 key（{_short(r)}）", kind=V_AUTH, status=r.status_code
+            f"HTTP {r.status_code}：网关拒绝这把 key（{_short(r)}）",
+            kind=V_AUTH,
+            status=r.status_code,
         )
     if r.status_code >= 500:
-        raise KeyVerifyError(f"HTTP {r.status_code}：{_short(r)}", kind=V_NETWORK, status=r.status_code)
+        raise KeyVerifyError(
+            f"HTTP {r.status_code}：{_short(r)}", kind=V_NETWORK, status=r.status_code
+        )
     if r.status_code != 200:
-        raise KeyVerifyError(f"HTTP {r.status_code}：{_short(r)}", kind=V_NETWORK, status=r.status_code)
+        raise KeyVerifyError(
+            f"HTTP {r.status_code}：{_short(r)}", kind=V_NETWORK, status=r.status_code
+        )
     try:
         data = r.json().get("data") or []
     except ValueError:
@@ -107,7 +113,9 @@ def chat_once(
         raise KeyVerifyError(f"{type(ex).__name__}: {ex}", kind=V_NETWORK) from ex
     if r.status_code in (401, 403):
         raise KeyVerifyError(
-            f"HTTP {r.status_code}：网关拒绝这把 key（{_short(r)}）", kind=V_AUTH, status=r.status_code
+            f"HTTP {r.status_code}：网关拒绝这把 key（{_short(r)}）",
+            kind=V_AUTH,
+            status=r.status_code,
         )
     if r.status_code != 200:
         raise KeyVerifyError(
@@ -149,7 +157,8 @@ def verify(
                     raise KeyVerifyError("chat 返回里既没有 choices 也没有 usage", kind=V_NETWORK)
             return {
                 "ok": True,
-                "note": f"ok({len(models)} models" + (f", {usage.get('total_tokens')} tok)" if usage else ")"),
+                "note": f"ok({len(models)} models"
+                + (f", {usage.get('total_tokens')} tok)" if usage else ")"),
                 "models": models,
                 "usage": usage,
             }

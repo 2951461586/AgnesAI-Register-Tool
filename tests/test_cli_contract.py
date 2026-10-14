@@ -100,9 +100,7 @@ def test_corrupt_read_source_fails_before_any_request(tmp_path, monkeypatch):
     runs = L.LEDGER_DIR / "runs" / "2026-10-14"
     runs.mkdir(parents=True)
     # 半截 JSON —— 模拟写盘时被杀 / 外部损坏
-    (runs / "accounts-20261014-000000.json").write_text(
-        '[{"email":"a@x.com"},', encoding="utf-8"
-    )
+    (runs / "accounts-20261014-000000.json").write_text('[{"email":"a@x.com"},', encoding="utf-8")
     monkeypatch.setattr(config, "validate", lambda: [])
     # 只要它走到 run_batch 就会发**真请求** —— 用哨兵把那条路炸出来
     monkeypatch.setattr(run, "run_batch", lambda **kw: pytest.fail("读源损坏时不该跑批！"))
