@@ -17,9 +17,14 @@ dependencies = [
     "requests[socks]>=2.31",
 ]
 
-# 开发依赖与运行依赖分开 —— CI 的 secret-scan job 只装运行依赖（甚至不装）。
+# 开发依赖与运行依赖分开 —— 运行依赖只有 requests（本地与将来的 CI 都一样）。
 #
-# 🔴 ruff 锁到次版本：它会随次版本**新增规则**，不锁的话某天 CI 会因为
+# ⚠ 本仓库目前**没有** CI 配置（没有 `.github/workflows/`）⇒ "密钥不会被提交"
+#    目前**只靠本地手动检查** + `.gitignore`，没有任何自动闸门。
+#    🔴 这一条有守卫用例钉住：一旦这里有 CI 的措辞而仓库里没有对应配置，
+#      `tests/test_doc_contract.py::test_ci_claim_implies_ci_config_exists` 会红。
+#
+# 🔴 ruff 锁到次版本：它会随次版本**新增规则**，不锁的话某天会因为
 #    "上游发新版"而红，跟当次改动毫无关系（且这种红很容易被当成噪声忽略）。
 [project.optional-dependencies]
 dev = [
