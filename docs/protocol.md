@@ -44,25 +44,27 @@ Referer: https://platform.agnes-ai.com/
 * `purpose=register` 是实测用的取值（注册流程）。
 * **不存在的域名也返回 200**（拿 `@example.com` 试过）—— 服务端不在这一步
   做域名校验，所以这一枪"成功"不代表能收到信。
-* ⚠ **"没有域名门"是错的说法**（本节曾这么写）。准确说法是：
-  **没有"自有域名"这道门**（`@own.example` 这类自有域名直接过，不像 OpenXLab
-  的 `A0232` 需要报备），**但平台侧有一道域名白名单** —— 同一台 Worker 的
-  7 个域名里，有 3 个被明确拒：
+* ⚠ **"没有域名门"是错的说法**（本节曾这么写）。准确说法是：**没有"自有域名"
+  这道门**（`@own.example` 这类自有域名直接过，不像 OpenXLab 的 `A0232` 需要
+  报备），**但平台侧有两道检查** —— 而且**返回两条不同的消息**：
 
-  | 域名 | 实测 |
-  | --- | --- |
-  | `own.example` / `sub.own.example` / `own2.example` / `own3.example` | ✅ 允许 |
-  | `own4.example` / `own5.example` / `own6.example` | ❌ 拒 |
+  | 消息 | 含义 | 实测命中 |
+  | --- | --- | --- |
+  | `This email domain looks invalid or abusive and is not allowed for registration` | 域名信誉 / 滥用名单 | `own4.example`、`own5.example`、`own6.example`、**`outlook.com`** |
+  | `Disposable or temporary email addresses are not allowed for registration` | **一次性邮箱名单** | `1secmail.com`、`mailinator.com`、`dropmail.me` |
+  | （放行） | | `own.example`、`sub.own.example`、`own2.example`、`own3.example`、`gmail.com`、`example.com`、`probe.own.example`、`catchmail.io`、`mailistry.com`、`zeppost.com`、`fengyou.cc`、`nutemail.com` |
 
-  被拒返回：
-  ```text
-  400 {"code":400,"message":"This email domain looks invalid or abusive and
-       is not allowed for registration"}
-  ```
+  🔴 **第二条消息是 2026-10-14 才发现的**（此前只知道第一条）。它意味着
+  **第三方临时邮箱服务基本都没戏** —— 实测的 3 个知名服务全被它拦下。
+  （同类项目也记着"约 70 个常见临时邮箱域名被拒，且**动态更新**"。）
+
+  🔴 **`outlook.com` 被拒是反直觉的**（大厂邮箱），但在**两个不同出口**上
+  各测一次结果一致。合理推测：`outlook.com` 正是"账号池 / 接码平台"的重灾区，
+  所以进了滥用名单。⇒ **不要**把接码平台买的 `@outlook.com` 当作可用域名。
 
   🔴 **域名数是吞吐的硬上限**（域名维度 2 格 = 1 个账号）⇒ 可用域名数直接决定
-  每小时能跑几个。把被拒的域名加进 `AR_MAIL_DOMAINS` 只会拿到确定性的
-  `rejected`，**还会白烧一格 IP 窗口** —— 没有收益，只有损失。
+  每小时能跑几个。把被拒的域名加进域名池只会拿到确定性的 `rejected`，
+  **还会白烧一格 IP 窗口** —— 没有收益，只有损失。
 
   ⚠ 白名单是**平台侧**的、随时可能变；换池前先跑
   `tools/probes/probe_domains.py`（⚠ 消耗注册窗口）。
@@ -71,7 +73,28 @@ Referer: https://platform.agnes-ai.com/
   不是域名拒绝。10-14 复测确认**允许**。**"未测清" ≠ "被拒"**：把限流当成
   域名被拒，就会白白丢掉一个可用域名。
 
-  本项目仍然**只有 Worker 一个邮箱源**，不引入 Intern 那套可插拔抽象。
+### 加域名窗口的两条路（以及为什么只有一条可靠）
+
+**域名数决定吞吐**，所以"多一个邮箱源"是唯一能加域名窗口的手段。实测两条路：
+
+| 路 | 结果 |
+| --- | --- |
+| **自有域名**（在 CF Worker 上加） | ✅ 唯一**可靠**的路：独占窗口、可预测。加完之后用 `probe_domains.py` 验白名单 |
+| **第三方临时邮箱服务** | ⚠️ 只有**没被列入名单**的能用。实测 `catchmail.io`（3 域名）可用；`1secmail` / `mailinator` / `dropmail` 全被拒；`outlook.com` 系（接码平台）被拒 |
+
+🔴 **第三方源的关键代价**：它的域名是**公共**的 —— 任何人都能在上面建地址
+⇒ 那个域名的服务端窗口**与陌生人共享**，可能被别人的量打满且**不可控**。
+所以它的定位是**补充窗口**，不是替代自有域名。
+（同类项目就记过 `Mail.tm` 的公共域名 `uberip.com`"周期性被封"。）
+
+⇒ 本项目因此支持**多源**（`AR_MAIL_SOURCES`，默认只有 `worker`）：
+自有域名当主力，`catchmail` 当溢出容量。详见 `src/mailbox.py`。
+
+⚠ **未测清**：**子域是不是独立窗口**。间接证据是"`own.example` 与
+`sub.own.example` 同时成功"—— 若服务端把它们算**同一个域名**，则合计 4 次
+请求会超阈值（2~3）⇒ 很可能按**精确 hostname** 计。但没测准，**不当结论用**。
+（另：Worker 只在自己配置的域名上建地址 —— `probe.own.example` 会 HTTP 400，
+所以子域这条路即使成立，也要先改 Worker。）
 
 ### ③ 验证码邮件
 

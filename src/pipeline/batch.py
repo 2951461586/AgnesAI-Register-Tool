@@ -24,6 +24,7 @@ from datetime import datetime
 
 from common import config
 
+from .. import mailbox as _mailbox
 from .. import quota as _quota
 from ..agnes import (
     ERR_NETWORK,
@@ -32,7 +33,6 @@ from ..agnes import (
     AgnesClient,
 )
 from ..proxypool import SlotPool, SlotPoolEmpty
-from ..tempmail import TempMailClient
 from .finish import finish, verify_keys
 from .limiter import WindowBusy
 from .provision import provision
@@ -70,7 +70,7 @@ def run_batch(
     `mail_factory` / `client_factory` 是**注入点**：默认造真的客户端，
     测试传假的 —— 这样编排、打标、配额逻辑都能**离线**测（零网络请求）。
     """
-    mail_factory = mail_factory or (lambda: TempMailClient())
+    mail_factory = mail_factory or (lambda domain=None: _mailbox.for_domain(domain))
     client_factory = client_factory or (lambda proxy=None: AgnesClient(proxy=proxy))
     # 槽位池：**由调用方拥有**（`run.py` 建它、传进来、跑完读它的统计）。
     # 不在这里建的原因：返回值是 `list[AccountRecord]`，没法把统计挂在上面
@@ -134,13 +134,14 @@ def run_batch(
             record_out(rec)
             return
         rec.proxy = slot or config.AR_PROXY
-        mail = mail_factory()
         client = client_factory(slot)
         ticket = Ticket(rec=rec, client=client, proxy=slot)
         try:
             provision(
                 ticket,
-                mail=mail,
+                # 🔴 传的是**工厂**而不是现成客户端：域名可能换到**另一个源**
+                #   （自有域名 ↔ catchmail），而两者的协议不同。
+                mail_for=mail_factory,
                 mail_domain=mail_domain,
                 slot_pool=slot_pool,
                 client_factory=client_factory,
