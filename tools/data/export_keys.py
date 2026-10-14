@@ -6,8 +6,10 @@
     python tools/data/export_keys.py --only-success        # 只导 status=success 的
     python tools/data/export_keys.py --out my.txt --format txt
 
-🔴 `exports/` 不在 `.gitignore` 里吗？—— **在**（见 `.gitignore` §凭据）。
-   但导出的文件本身是明文凭据，**不要**拷进仓库或贴到别处。
+🔴 `exports/` 是**明文凭据**（整把 `sk-` key），已在 `.gitignore` 中按目录排除
+   —— 见 `.gitignore` §凭据（**唯一真源**，别在这里另写判断：这条注释曾经
+   写着"在"而实际不在，于是"文档承诺了安全、实现没有"）。
+   即便如此，导出的文件本身仍是明文，**不要**拷进仓库或贴到别处。
 """
 
 import argparse
@@ -55,7 +57,9 @@ def main(argv=None):
 
     out = Path(args.out) if args.out else (ROOT / "exports" / f"keys.{args.format}")
     if args.format == "txt":
-        fsutil.atomic_write_text(out, "\n".join(r["api_key"] for r in rows) + ("\n" if rows else ""))
+        fsutil.atomic_write_text(
+            out, "\n".join(r["api_key"] for r in rows) + ("\n" if rows else "")
+        )
     elif args.format == "csv":
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = fsutil.tmp_path_for(out)
