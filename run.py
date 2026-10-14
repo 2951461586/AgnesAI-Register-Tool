@@ -40,7 +40,7 @@
   0 = 至少有一个账号成功（或没有要跑的）
   1 = 本批**全部失败**（配置 / 网络 / 服务端拒绝）
   2 = 本地配额闸门拦下（**一个请求都没发**）
-  3 = 台账防静默缩水护栏触发（拒绝写盘，避免丢账号）
+  3 = 台账护栏触发（读源损坏 / 防静默缩水，拒绝写盘，避免丢账号）
   4 = 缺少必需配置
   5 = 内部错误（记录序列化失败）
 """
@@ -120,6 +120,21 @@ def main(argv=None):
         )
         return 4
 
+    # ── 台账读源：**在任何请求之前**读好 ──────────────────────
+    # 🔴 为什么放在这里（跑批之前），而不是留到落盘阶段：读源损坏时落盘会失败，
+    #    而那时**整批请求已经花掉了** —— 服务端的注册窗口是本工具最贵的资源。
+    #    `load_read_source` 损坏就抛，所以这个失败在启动阶段就能拦住。
+    # ⚠ 代价：读源比"跑完再读"略旧一点。单进程单批的用法下无所谓；
+    #    真要同时跑两批，本来就该用不同的 `--out`（两批写同一份台账必然互相覆盖）。
+    out = Path(args.out) if args.out else None
+    existing: list[dict] = []
+    if not args.overwrite:
+        try:
+            existing = _ledger.load_read_source(out or _ledger.ledger_path())
+        except _ledger.LedgerCorrupt as ex:
+            print(f"✗ {ex}", file=sys.stderr)
+            return 3
+
     # ── 本地配额闸门（**在发任何请求之前**）────────────────────────
     st = _quota.status()
     print(f"本地配额：{st.describe()}  [state: {_quota.state_path()}]", flush=True)
@@ -192,15 +207,14 @@ def main(argv=None):
         print(f"✗ 内部错误：AccountRecord.to_json() 产出了非法 JSON：{ex}", file=sys.stderr)
         return 5
 
-    out = Path(args.out) if args.out else None
     if args.overwrite:
         merged = new_records
         print(f"\n（--overwrite：只写本次 {len(merged)} 条，不合并历史）")
     else:
-        # 🔴 读源用 `out or ledger_path()`：`--out` 不填时**必须**读台账读源。
-        #    若这里退化成读"本次要写的那个新文件"，合并就等于没做 ——
-        #    每次运行都从零开始，正是"`--count 1` 把 53 条覆盖成 1 条"那条路。
-        existing = _ledger.load_existing(out or _ledger.ledger_path())
+        # 🔴 读源已在**启动阶段**读好（见 main 开头）：那里读是为了"别白跑一批"，
+        #    这里只负责合并。用的是 `load_read_source`（**损坏就抛**）而不是
+        #    `load_existing`（损坏时静默返回 `[]`）—— 后者会写出"只剩本批"的
+        #    快照，把历史账号静默丢光（实测 50 条 → 1 条，而退出码还是 0）。
         merged, kept, added, upgraded = _ledger.merge_records(existing, new_records)
         if kept:
             print(_cli.merge_summary_line(kept, added, upgraded, len(merged)))
