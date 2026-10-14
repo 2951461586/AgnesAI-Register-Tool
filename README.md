@@ -32,7 +32,14 @@ python run.py --count 6 --producers 1 --workers 1   # 强制顺序（最保守�
 python run.py --out accounts.json      # 导出到指定文件（**不落台账快照**）
 python run.py --ignore-quota           # 跳过本地配额闸门
 python run.py --quiet                  # 只输出汇总
+python run.py --count 4 --preflight    # 跑批前先体检出口链路（不耗注册窗口）
 ```
+
+🔴 **批量前建议加 `--preflight`**：注册窗口是本工具最贵且**不可再生**的资源
+（撞上就是 1 小时）。预检只打只读请求，**不消耗注册窗口**；判定链路处于
+坏时段就**中止**（退出码 6），而不是把窗口白烧掉。
+判据不是"失败率高低"，而是"**多数出口一起坏**吗"—— 个别坏槽位不该拦住整批
+（撞到它换出口就行）。详见 `src/preflight.py`。
 
 启动阶段会校验配置：缺 `AR_WORKER_*` 直接退出（码 4），
 本地配额窗口已满直接退出（码 2，**一个请求都不发**）。
@@ -152,7 +159,8 @@ src/pipeline/        两段式流水线（P5 拆包：每个子模块只讲一�
 src/ledger.py        账号台账（合并 + 防静默缩水）
 src/quota.py         本地配额闸门（爆炸半径上限）
 src/jsonlstore.py    JSONL 状态存储（唯一实现：追加 / 宽容读取 / 原子重写）
-src/windowstore.py   滑动窗口事件（**跳进程持久化**）
+src/windowstore.py   滑动窗口事件（**跨进程持久化**）
+src/preflight.py     跑批前的**链路健康预检**（只读，不耗注册窗口）
 src/proxypool.py     槽位代理池
 src/report.py        收尾报告（纯展示，依赖注入）
 src/{redact,fsutil,cli}.py  脱敏 / 原子写盘 / CLI 共用骨架
@@ -204,6 +212,7 @@ CI（`.github/workflows/ci.yml`）跑上面三样 + `gitleaks` 密钥扫描（**
 | 3 | 台账防静默缩水护栏触发（拒绝写盘） |
 | 4 | 配置有问题（缺凭据 / 值不合法，如窗口上限装不下一个账号） |
 | 5 | 内部错误（记录序列化失败） |
+| 6 | 链路预检不通过（`--preflight`；**未发出任何注册请求**） |
 
 ---
 

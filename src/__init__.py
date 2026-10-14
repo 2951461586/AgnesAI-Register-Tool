@@ -14,6 +14,7 @@
     jsonlstore.py JSONL 状态存储（**唯一实现**：追加 / 宽容读取 / 原子重写）
     windowstore.py 滑动窗口事件存储（**跨进程持久化**，与服务端两道窗口同构）
     report.py     批量收尾报告（纯展示，依赖注入，不 import 上层）
+    preflight.py  跑批前的链路健康预检（只读，不耗注册窗口）
     redact.py     日志 / 输出边界的脱敏
     fsutil.py     原子写盘（唯一实现）
     cli.py        两个 CLI 入口共用的骨架

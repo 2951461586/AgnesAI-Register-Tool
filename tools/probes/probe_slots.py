@@ -37,14 +37,12 @@ Intern-Register-Tool 实测过：本机开着 Clash TUN 时，连一个**不可�
 
 import argparse
 import sys
-from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from _path import ROOT  # noqa: F401,E402
 
 from common import config  # noqa: E402
-from src.proxypool import SlotStats  # noqa: E402
-from src.redact import redact_url  # noqa: E402
+from src import preflight as _preflight  # noqa: E402
 
 IP_ECHO = "https://api.ipify.org?format=json"
 # 只读 + 无鉴权 ⇒ 401。**不是**注册类端点，所以不消耗注册窗口。
@@ -79,40 +77,6 @@ def agnes_reachable(slot: str | None) -> str:
         return f"EXC {type(ex).__name__}: {ex}"
 
 
-def agnes_rate(slot: str | None, n: int) -> tuple:
-    """连打 `n` 次 Agnes，返回 `(成功数, {异常类型: 次数})`。
-
-    🔴 与 `agnes_reachable` 的差别：那个是**一次**取样，只能回答"通不通"；
-      这个回答"**多常**不通" —— 而判"坏槽位"靠的正是后者（见模块 docstring）。
-    """
-    px = config.proxies(slot) if slot else None
-    ok, errs = 0, {}
-    for _ in range(n):
-        try:
-            _session().get(AGNES_PROBE, proxies=px, timeout=25)
-            ok += 1
-        except Exception as ex:  # noqa: BLE001
-            name = type(ex).__name__
-            errs[name] = errs.get(name, 0) + 1
-    return ok, errs
-
-
-def _label(slot: str | None) -> str:
-    """报告用的短标签 —— 🔴 **不能泄凭据，也不能让槽位长得一样**。
-
-    ⚠ 只用 `redact_url(slot)` 是**不够**的：本项目 `.slots.txt` 的 10 个槽位是
-      "同 host:port、不同 sid"，脱敏后**全部长成一样** ⇒ 表格里根本看不出是
-      哪个出口在失败 —— 而那正是本工具要回答的问题（实测踩过：`--repeat`
-      表格里 0/3 全坏的那一行跟其它 9 行长得一模一样，无法定位）。
-
-    所以复用 `SlotStats.label`（它已由用例钉住"不泄代理密码"），
-    形态是 `host:port#<短哈希>`。
-    """
-    if not slot:
-        return redact_url(config.AR_PROXY) or "(直连)"
-    return SlotStats(url=slot).label
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description="槽位出口体检")
     ap.add_argument("--urls", default=None, help="逗号分隔的槽位 URL（默认读配置）")
@@ -143,7 +107,7 @@ def main(argv=None):
         ip = egress_ip(slot)
         reach = agnes_reachable(slot)
         ips.append(ip)
-        print(f"{_label(slot):<34} {ip:<18} {reach}")
+        print(f"{_preflight.label(slot):<34} {ip:<18} {reach}")
 
     real = [ip for ip in ips if not ip.startswith("EXC")]
     dupes = {ip for ip in real if real.count(ip) > 1}
@@ -160,51 +124,15 @@ def main(argv=None):
 
 
 def _rate_section(targets, n: int) -> None:
-    """按出口的失败率。见模块 docstring：判"坏槽位"看这个，不看失败数。"""
+    """按出口的失败率。
+
+    🔴 **实现搬去了 `src/preflight.py`** —— 那里是**唯一实现**，
+      `run.py --preflight` 用的是同一份。两处各写一遍必然漂移，而漂移的
+      形态是"探针说可以跑、跑批却拦下来"（判据不一致）。
+    """
     print()
     print("─" * 78)
-    print(f"失败率（每出口 {n} 次 GET /api/user/self，无鉴权 ⇒ **不消耗注册窗口**）")
-    print(f"{'槽位':<34} {'成功':<10} {'失败率':<8} 失败形态")
-    print("-" * 78)
-
-    # 跨槽位并行、槽位内串行（保持每个出口的请求是有先后顺序的真实形态）
-    with ThreadPoolExecutor(max_workers=min(len(targets), 11)) as ex:
-        measured = list(ex.map(lambda s: agnes_rate(s, n), targets))
-
-    failed = []
-    for slot, (ok, errs) in zip(targets, measured, strict=True):
-        rate = 1 - ok / n
-        if rate:
-            failed.append((_label(slot), rate))
-        print(f"{_label(slot):<34} {ok}/{n:<8} {rate:>6.0%}   {errs or ''}")
-    print("-" * 78)
-
-    # 🔴 样本量警告 —— 这条是**实测教训**，不是防御性提醒。
-    if n < 10:
-        print(f"⚠ 每出口只测了 {n} 次 ⇒ **样本量不足**，不能据此判定'某个出口坏了'。")
-        print("   实测过：同一出口 5 次 `0/5` 全 SSLError，几分钟后 15/15 全好。")
-        print("   失败是**时间聚集**的 ⇒ 判坏槽位要在**多个时间点**重复测。")
-
-    # 🔴🔴 **最重要的一条判据**：多数出口一起坏 ⇒ 链路坏时段，
-    #      **任何删槽位的结论都无效**。这是真实踩出来的：
-    #      某一轮里 10 个老槽位 17~50%，而**刚加的新代理也 42%** ——
-    #      一个新出口不可能"是坏槽位"，所以那一轮的高低全是链路侧的
-    #      （而那个新代理在坏时段之前是 **0%**）。
-    #      ⇒ 只看绝对失败率会把好槽位删掉（本项目差点干两次）。
-    #
-    #    ⚠ 阈值取**一半以上**（而不是">=3"）：3/11 个失败时典型形态是
-    #      "2 个 100% + 1 个 17%" —— 那是**真的有几个坏槽位**，不是链路坏时段。
-    #      报错了会让人对整条告警免疫（狼来了）。
-    if len(failed) >= max(3, len(targets) // 2):
-        print(f"🔴 {len(failed)}/{len(targets)} 个出口都在失败 ⇒ 这更像**链路 / 平台侧的坏时段**，")
-        print("   而不是单个槽位坏了。**不要据此删任何槽位。**")
-        print("   判据：一个新加的出口也会一起坏 ⇒ 问题不在槽位。请**换时间点复测**。")
-
-    if failed:
-        print(f"⚠ 有失败率的出口：{[(x, f'{r:.0%}') for x, r in failed]}")
-        print("   撞到 network 的正确反应是**换出口重试**，而不是把出口拉黑。")
-    else:
-        print(f"✅ 全部 {n}/{n} —— 当前没有持续坏掉的出口。")
+    print(_preflight.run(targets, repeat=n).describe())
 
 
 if __name__ == "__main__":
