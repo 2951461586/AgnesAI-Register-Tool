@@ -143,7 +143,12 @@ common/config.py     全局配置与启动校验（AR_* 环境变量）
 src/tempmail.py      CF Worker 邮箱客户端（建地址 + 按收件人收信 + 抽验证码）
 src/agnes.py         Agnes 控制台协议（verification/register/login/token/...）
 src/apikey.py        推理网关侧的 key 可用性校验
-src/pipeline.py      两段式流水线 + 按出口的滑动窗口限速
+src/pipeline/        两段式流水线（P5 拆包：每个子模块只讲一件事）
+  ├ limiter.py       本地闸门：滑动窗口 / 域名预留 / 限流器工厂 / 换出口
+  ├ record.py        AccountRecord / Ticket / classify / STAGES
+  ├ provision.py     生产者段：建邮箱 → 发码 → 等码
+  ├ finish.py        消费者段：注册 → 登录 → 建 Key → 只读校验
+  └ batch.py         编排：生产者池 ‖ 消费者池 + 配额闸门 + 收尾
 src/ledger.py        账号台账（合并 + 防静默缩水）
 src/quota.py         本地配额闸门（爆炸半径上限）
 src/jsonlstore.py    JSONL 状态存储（唯一实现：追加 / 宽容读取 / 原子重写）

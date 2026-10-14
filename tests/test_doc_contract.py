@@ -190,24 +190,27 @@ def test_every_module_is_documented():
     有哪些模块"的**唯一入口**。漏登不会报错，只会让人找不到东西。
 
     ⚠ 判据是**子串**（模块名 stem），所以 `src/{a,b,c}.py` 这种合并写法也算数。
-    ⚠ 每个包查**自己**的 `__init__.py`：`config` 在 `common/` 下，就不该指望
-      `src/__init__.py` 里出现它（它们各自的模块分工是分开维护的）。
+    ⚠ 每个模块查**它自己那个包**的 `__init__.py`：`config` 在 `common/` 下，
+      就不该指望 `src/__init__.py` 里出现它；`pipeline/limiter.py` 同理该在
+      `src/pipeline/__init__.py` 里登记。
+    ⚠ 必须**递归**扫（`rglob`）：P5 把 `src/pipeline.py` 拆成了包，用 `glob` 的话
+      5 个子模块会整个跳过 —— 而那正是本用例要防的"新东西没人登记"。
     """
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    inits = {
-        pkg: (ROOT / pkg / "__init__.py").read_text(encoding="utf-8") for pkg in ("src", "common")
-    }
-    mods = sorted(
-        (pkg, p.stem)
+    mods = [
+        (p, p.parent / "__init__.py")
         for pkg in ("src", "common")
-        for p in (ROOT / pkg).glob("*.py")
+        for p in sorted((ROOT / pkg).rglob("*.py"))
         if p.stem != "__init__"
-    )
+    ]
     assert mods, "没扫到任何模块 —— 本用例的前提变了"
-    for pkg, name in mods:
-        assert name in readme, f"模块 `{pkg}/{name}.py` 没在 README 的目录里登记"
-        assert name in inits[pkg], (
-            f"模块 `{pkg}/{name}.py` 没在 `{pkg}/__init__.py` 的模块分工里登记"
+    for p, init in mods:
+        rel = p.relative_to(ROOT).as_posix()
+        irel = init.relative_to(ROOT).as_posix()
+        assert p.stem in readme, f"模块 `{rel}` 没在 README 的目录里登记"
+        assert init.is_file(), f"`{rel}` 所在目录没有 `__init__.py`"
+        assert p.stem in init.read_text(encoding="utf-8"), (
+            f"模块 `{rel}` 没在 `{irel}` 的模块分工里登记"
         )
 
 
