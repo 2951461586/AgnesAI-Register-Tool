@@ -138,7 +138,7 @@ MAIL_SOURCES = [
 ]
 # 唯一真源：`validate()` / `lint()` 与 `mailbox.py` 的工厂都从这里取 ——
 # 避免"校验认得的取值"和"工厂认得的取值"各写一份然后漂移。
-MAIL_SOURCE_KINDS = ("worker", "catchmail")
+MAIL_SOURCE_KINDS = ("worker", "catchmail", "smailr")
 
 # catchmail 的域名。实测（2026-10-14）：3 个**全部过 Agnes 白名单**，
 # 且端到端可用（建址→发码→**2s 收到验证码**）。可用 `AR_CATCHMAIL_DOMAINS` 覆盖。
@@ -150,6 +150,36 @@ MAIL_SOURCE_KINDS = ("worker", "catchmail")
 CATCHMAIL_DOMAINS = [
     d.strip() for d in os.getenv("AR_CATCHMAIL_DOMAINS", "").split(",") if d.strip()
 ] or ["catchmail.io", "mailistry.com", "zeppost.com"]
+
+# ── smailr 邮箱源 ────────────────────────────────────────────────
+# 🔴 它给 **4 个**域名，实测（2026-10-14）**全部过 Agnes 白名单** ⇒ 域名池
+#    7 → 11。所以它是三个源里**最值**的一个（catchmail 只给 3 个）。
+#
+# ⚠ **账号等级是硬门**：不传 `domain_id` 时用账号的**默认域名**，而默认域名可能
+#    要求更高等级（实测撞到 `403 该域名要求用户等级 4 及以上，您当前等级为 2`）。
+#    ⇒ 账号后台要把「邮箱域名」设成下面这 4 个之一（它们是**等级 1** 就能用的）。
+SMAILR_API_KEY = os.getenv("AR_SMAILR_API_KEY", "").strip()
+SMAILR_BASE = os.getenv("AR_SMAILR_BASE", "").strip() or "https://smailr.com"
+# 等级 1 就能用的 4 个域名（与参考实现 `SMAILR_LV1_DOMAINS` 一致）。
+SMAILR_DOMAINS = [
+    d.strip().lower() for d in os.getenv("AR_SMAILR_DOMAINS", "").split(",") if d.strip()
+] or ["smailr.com", "loc.cc", "mail.nodeloc.cc", "nodeloc.cc"]
+# 账号后台里设的那个默认域名 —— 它是**唯一可以省略 `domain_id`** 的域名。
+SMAILR_DEFAULT_DOMAIN = os.getenv("AR_SMAILR_DEFAULT_DOMAIN", "").strip().lower() or "smailr.com"
+# 非默认域名需要显式给 `domain_id`（API **不可枚举**域名，只能人工拿）。
+# 写法：`域名=id,域名2=id2`。
+SMAILR_DOMAIN_IDS = {
+    k.strip().lower(): v.strip()
+    for k, _, v in (
+        item.partition("=") for item in os.getenv("AR_SMAILR_DOMAIN_IDS", "").split(",")
+    )
+    if k.strip() and v.strip()
+}
+# 🔴 **成功落库后删除该邮箱**（默认开）。理由：smailr 账号有**邮箱总数上限**
+#    （实测 `mailbox_limit=100`），而每个账号占一个邮箱 ⇒ 不删会跑几十个就卡死。
+#    ⚠ 删除**不可逆**，但它发生在账号已经进台账**之后** —— 台账里存的是 Agnes
+#      的凭据（密码/JWT/sk- key），与收信邮箱无关，删掉不影响账号可用性。
+SMAILR_DELETE_AFTER_SUCCESS = _env_bool("AR_SMAILR_DELETE_AFTER_SUCCESS", True)
 
 # ── Agnes 站点 ────────────────────────────────────────────────────
 # 🔴 **两个域名**：业务 API 在 `platform-backend.agnes-ai.com`，
@@ -412,6 +442,8 @@ def validate() -> list[str]:
             missing.append("AR_WORKER_BASE")
         if not WORKER_DOMAIN:
             missing.append("AR_WORKER_DOMAIN")
+    if "smailr" in MAIL_SOURCES and not SMAILR_API_KEY:
+        missing.append("AR_SMAILR_API_KEY（启用 smailr 源时必需）")
     # 源名写错是配置错误，且**必须**报出来：`source_of()` 对未知域名一律
     # 回落到 `worker`，所以一个拼错的源名会静默变成"用 Worker"。
     unknown = [s for s in MAIL_SOURCES if s not in MAIL_SOURCE_KINDS]
@@ -498,6 +530,8 @@ def mail_domains() -> list[str]:
         out += MAIL_DOMAINS or ([WORKER_DOMAIN] if WORKER_DOMAIN else [])
     if "catchmail" in MAIL_SOURCES:
         out += CATCHMAIL_DOMAINS
+    if "smailr" in MAIL_SOURCES:
+        out += SMAILR_DOMAINS
     # 去重但保序（同一个域名可能被两个源都列到）
     seen: set[str] = set()
     return [d for d in out if not (d.lower() in seen or seen.add(d.lower()))]
@@ -513,4 +547,6 @@ def source_of(domain: str) -> str:
     d = (domain or "").strip().lower()
     if d and d in {x.lower() for x in CATCHMAIL_DOMAINS}:
         return "catchmail"
+    if d and d in {x.lower() for x in SMAILR_DOMAINS}:
+        return "smailr"
     return "worker"

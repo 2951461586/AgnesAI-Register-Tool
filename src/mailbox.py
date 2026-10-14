@@ -3,8 +3,9 @@
 为什么需要这一层
 ================
 `provision` 需要的是"给我**这个域名**的邮箱客户端"。而域名现在来自**多个源**
-（自有 CF Worker / catchmail），两者的协议完全不同（一个要 `X-Admin-Token`、
-一个要 `Referer`/`Origin`）⇒ 必须有个地方决定用哪个。
+（自有 CF Worker / catchmail / smailr），三者的协议完全不同（一个要
+`X-Admin-Token`、一个要 `Referer`/`Origin`、一个要 `Bearer nm_...`）
+⇒ 必须有个地方决定用哪个。
 
 🔴 **`MailboxSource` 是结构性契约（`typing.Protocol`），不是基类。**
    `provision` 本来就是鸭子类型（用例传的是 `FakeMail()`），这里只是把既有事实
@@ -27,6 +28,7 @@ from typing import Protocol, runtime_checkable
 from common import config
 
 from .catchmail import CatchMailClient
+from .smailr import SmailrClient
 from .tempmail import TempMailClient
 
 
@@ -62,6 +64,59 @@ def for_domain(domain: str | None) -> MailboxSource:
       而生产者是并发的。所以"一个账号一条链一个客户端"这条约定必须在这里守住
       （与 `Ticket` 里 `client` 的顺序交接同理）。
     """
-    if config.source_of(domain or "") == "catchmail":
+    kind = config.source_of(domain or "")
+    if kind == "catchmail":
         return CatchMailClient()
+    if kind == "smailr":
+        return SmailrClient()
     return TempMailClient()
+
+
+def cleanup_successful(records, *, log=print) -> dict:
+    """**成功落库之后**删掉 smailr 的收信邮箱。返回 `{"deleted", "failed"}`。
+
+    🔴 为什么必须在落库**之后**：删除**不可逆**，而"账号已进台账"是唯一的
+      安全点 —— 万一落盘失败，邮箱还在，还能重跑那条链。所以调用点在
+      `run.py` 的 `save_snapshot()` 之后，而不是 `finish()` 里。
+
+    🔴 为什么必须删：smailr 账号有**邮箱总数上限**（实测 `mailbox_limit=100`），
+      而每个账号占一个 ⇒ 不删跑几十个就卡死。
+
+    🔴 **只删"我们新建的"，不删"复用的"**。复用的邮箱是用户**预先建好的池子**
+      （账号等级不够时只能领现成的，见 `src/smailr.py`），删掉它下一个账号就没得
+      用 —— 而那个冲突是**真实的**：实测里 `create_mailbox` 已经会走复用路径了。
+      判据是台账字段 `mail_reused`（由 `provision` 写入）。
+
+    ⚠ **非致命**：删不掉只告警 —— 账号已经保存好了，不该因为清理失败让整批失败。
+    ⚠ 只处理 `status == "success"` 的：失败的账号可能要重跑，把它的邮箱删了
+      反而会丢掉唯一的收信地址。
+    """
+
+    def _f(r, name, default=""):
+        """同时吃 dict 与 `AccountRecord`（调用方两处都会传）。"""
+        return (r.get(name) if isinstance(r, dict) else getattr(r, name, default)) or default
+
+    targets = [
+        r
+        for r in records
+        if _f(r, "status") == "success"
+        and config.source_of(_f(r, "mail_domain")) == "smailr"
+        # 🔴 复用的**不删**（见 docstring）
+        and not (r.get("mail_reused") if isinstance(r, dict) else getattr(r, "mail_reused", False))
+    ]
+    if not targets:
+        return {"deleted": 0, "failed": 0}
+
+    client = SmailrClient()
+    deleted = failed = 0
+    for r in targets:
+        email = _f(r, "email")
+        if not email:
+            continue
+        if client.delete_mailbox(email):
+            deleted += 1
+            log(f"  🗑  smailr 邮箱已删：{email}")
+        else:
+            failed += 1
+            log(f"  ⚠ smailr 邮箱删不掉（账号已落库，不影响可用性）：{email} — {client.last_error}")
+    return {"deleted": deleted, "failed": failed}
