@@ -222,6 +222,16 @@ POST https://apihub.agnes-ai.com/v1/chat/completions {"model":"agnes-2.5-flash",
 
 - **`login` 不受影响**：连打 6 次错误密码 → 全是 `401`，没有 429。
 
+  🔴 2026-10-14 **加强复测到 25 次**错密码登录，仍然**全程 401**（每次
+  0.6~2.5s，无任何限流）⇒ **`login` 不消耗注册尝试窗口**。
+
+  ⚠ 这与同类项目（`hackerxiaow/agnes-ai-register`）的记载**相反** —— 它写
+  "发码/注册/登录/建Key **都计数**"。以**实测**为准：本项目的 IP 窗口只算在
+  `发码 + 注册` 两枪上（`provision` / `finish` 各 1 格），`login` **不计**。
+
+  ⚠ **仍未测**：`create_key` 是否计数。要有效 JWT 才能试，而试的过程会
+  **真建出 key**（有副作用），所以没测。
+
 - **请求体校验先于限流检查**：密码 < 8、两次密码不一致、`code` < 4 位会返回
    各自的校验错误（`400 Password must be at least 8 characters` /
    `400 Passwords do not match` / `422 body -> code: String should have at least
@@ -230,6 +240,20 @@ POST https://apihub.agnes-ai.com/v1/chat/completions {"model":"agnes-2.5-flash",
 - **一次 ~16 连发的突发会触发**，且触发后 **>45 分钟仍被拦**：早期 30s 间隔
   探测在 **t+214s** 仍 400；后续同出口复测在 **t+45 分钟**仍被拦
   （⇒ 早期那条「窗口 >4 分钟」的结论已被这个更强的观测取代）。
+
+  🔴 **但这个 "~16" 的维度归属存疑**（2026-10-14 复核探针时发现）：
+  `probe_register_limit.py` 当时**固定用一个域名**做每一发，而**域名阈值只有
+  2~3** ⇒ 那个突发**先撞上的是域名维度**，测到的很可能是**域名维度的聚合**，
+  而不是 IP 维度的阈值。
+
+  ⚠ 两条限流消息**格式相同**（都是 `Too many registration attempts from this
+  IP / from this email domain`，只有中间一个词不同），所以**只看消息很容易
+  分不出是哪一维** —— 这正是当时没发现的原因。
+
+  ⇒ 探针已修：现在**轮换域名**（不传 `--domain`），这样
+  `域名数 × 2~3` 发之内不会撞域名维度，更早被拦就是 IP 维度。
+  传 `--domain` 锁一个域名时它会**明确警告"这测的是域名维度"**。
+  **IP 维度的阈值仍然未测准。**
 
 ### 未测（**不要当结论用**）
 
