@@ -509,8 +509,9 @@ def test_send_code_network_failure_charges_exactly_one_grid(monkeypatch):
     会比服务端**松**，而"宁可少打"是本地闸门的一贯要求。
 
     实测踩到（2026-10-14 11:36 跑批）：3 条 `send_code` 撞网络错误，
-    域名窗口**各扣 0 格**（预留的 2 格被 `_release_domain_reservation` 全数还回）。
+    域名窗口**各扣 0 格**（预留的 2 格被全数还回）。
     根因是预留只在**成功 / 限流**两条路上扣，网络失败那条没扣。
+    ⇒ 现在这条不变量由 `DomainReservation.consume()`（在调用**之前**扣）保证。
     """
     monkeypatch.setattr(P.config, "mail_domains", lambda: ["only.com"])
     monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 2)
