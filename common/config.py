@@ -181,10 +181,18 @@ VERIFY_TIMEOUT = _env_float("AR_VERIFY_TIMEOUT", 60)
 #     · `register_limiter(slot)`   —— IP 维度，按出口分桶
 #     · `domain_limiter(domain)`   —— 域名维度，**全局**分桶（保守：宁可少打）
 #   撞到服务端消息时：IP 维度 → 换出口；域名维度 → 换域名；换不动才退避。
+#
+# 🔴 单位是「**请求**」，不是一个账号一枪：`/api/verification` 与
+#    `/api/user/register` 共用同一张计数，所以 **2 次 = 1 个账号**
+#    （`REQUESTS_PER_ACCOUNT`，见 src/pipeline.py）。想跑 N 个账号就调成 ≥ 2N。
+#    这个单位被误读过一次（"2 次" → "2 个账号"），而误读的后果不是报错，
+#    是"码烧了、注册进不去"。
 REGISTER_MAX_PER_WINDOW = max(1, _env_int("AR_REGISTER_MAX_PER_WINDOW", 2))
 REGISTER_WINDOW_S = max(1.0, _env_float("AR_REGISTER_WINDOW_S", 3600.0))
 # 域名维度的窗口。与 IP 维度**分开配** —— 它们的真实长度未必相同，
 # 合成一个数会让"调 IP 的"顺手把域名的也改了。
+# 🔴 与 IP 维度不同的是：域名维度在注册时**换不动**（邮箱里已经写死了），
+#    所以 `provision` 必须**一次占够 REQUESTS_PER_ACCOUNT 格**才能发码。
 DOMAIN_MAX_PER_WINDOW = max(1, _env_int("AR_DOMAIN_MAX_PER_WINDOW", 2))
 DOMAIN_WINDOW_S = max(1.0, _env_float("AR_DOMAIN_WINDOW_S", 3600.0))
 # 本地闸门"等不起就换维度"的阈值（秒）。
