@@ -188,12 +188,13 @@ python tools/data/export_keys.py             # 导出 sk- key 列表
 python -m pytest              # 全部**离线**用例（零网络，不需要任何凭据）
 python -m ruff check .        # lint
 python -m ruff format --check .
+npx --yes pyright@1.1.414     # 类型检查（配置见 pyproject 的 [tool.pyright]）
 ```
 
 ⚠ 这里刻意**不写用例数** —— 写死了就会漂移（而“文档里的数字跟不上实现”
 正是 P3 要防的事）。
 
-CI（`.github/workflows/ci.yml`）跑上面三样 + `gitleaks` 密钥扫描（**全历史**）。
+CI（`.github/workflows/ci.yml`）跑上面四样 + `gitleaks` 密钥扫描（**全历史**）。
 
 🔴 用例刻意**不依赖宿主的 `.env`**：清掉 `AR_WORKER_*`（CI 就是这样）也全绿
 —— `tests/conftest.py` 的夹具把域名池 / 槽位池 / 状态文件都替换成确定值。

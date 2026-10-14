@@ -81,3 +81,19 @@ ignore = [
 # ⚠ 代价：这个文件里**真的**多余的 import 不会被报出来。但"转出漏了"会被用例
 #    直接抓到（`tests/` 会 AttributeError），所以这个代价可以接受。
 "src/pipeline/__init__.py" = ["F401"]
+
+[tool.pyright]
+# 🔴 基线是**干净**的（pyright 1.1.414，2026-10-14：50 个文件、0 error、0 warning）
+#    ⇒ 所以这里**不需要**"先豁免一堆历史问题"，任何新报错就是本次改动引入的。
+#
+# ⚠ 顺带说明：IDE / LSP 侧报的那些
+#      `"jsonlstore" is unknown import symbol`
+#    是**陈旧索引**的假阳性 —— 真正跑一遍 pyright 是干净的。诊断依据：那份
+#    索引快照里既没有新模块，又还列着 4 个**已不存在**的文件。
+include = ["src", "common", "tools", "tests", "run.py"]
+# 这些目录里没有 .py（台账 / 状态 / 备份都是数据），显式排除免得白扫。
+exclude = ["**/__pycache__", "backups", "ledger", "state", "exports", ".workbuddy-ai"]
+pythonVersion = "3.11"
+# ⚠ 显式写死检查级别（而不是吃默认值）：默认值会随 pyright 版本变，而那会让
+#    "某天 CI 无缘无故变红" —— 与 ruff 锁次版本是同一个理由。
+typeCheckingMode = "standard"
