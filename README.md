@@ -160,6 +160,7 @@ src/ledger.py        账号台账（合并 + 防静默缩水）
 src/quota.py         本地配额闸门（爆炸半径上限）
 src/mailbox.py       邮箱源注册表（**按域名派发**到对应的客户端）
 src/catchmail.py     catchmail.io 邮箱源（第二个源；公共域名 = **共享窗口**）
+src/smailr.py        smailr.com 邮箱源（第三个源；4 个域名 + **成功落库后删邮箱**）
 src/jsonlstore.py    JSONL 状态存储（唯一实现：追加 / 宽容读取 / 原子重写）
 src/windowstore.py   滑动窗口事件（**跨进程持久化**）
 src/preflight.py     跑批前的**链路健康预检**（只读，不耗注册窗口）

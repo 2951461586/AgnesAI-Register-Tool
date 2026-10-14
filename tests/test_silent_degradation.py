@@ -88,6 +88,14 @@ LOOP_ALLOWED = {
         "    ⚠ 两个源共用同一套语义是**有意的**：`provision` 靠 `last_error` 是否"
         "为空来分流，两个源给出不同的语义会让那个分流变成碰运气。"
     ),
+    ("src/smailr.py", "wait_for_mail"): (
+        "与 `src/tempmail.py` / `src/catchmail.py` 的 `wait_for_mail` **完全同构**"
+        "—— **三个源共用同一套语义是有意的**：`provision` 靠 `last_error` 是否为空"
+        "来分流（空 = 邮件没到 → `MAIL_TIMEOUT`；非空 = 读不出来 → `MAIL_READ`），"
+        "三个源给出不同语义会让那个分流变成碰运气。\n"
+        "     `while time.time() < deadline` 耗尽 = **等超时**，`None` 就是它的正常"
+        "出口之一；循环后那段是**分类**而不是降级。"
+    ),
 }
 
 

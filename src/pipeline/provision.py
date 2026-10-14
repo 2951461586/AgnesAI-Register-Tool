@@ -165,6 +165,10 @@ def provision(
             )
         rec.email = address
         rec.mail_domain = domain
+        # 🔴 记下"这个邮箱是**领来的**还是新建的" —— 清理阶段靠它决定删不删：
+        #    复用的邮箱是**用户预先建好的池子**，删了下一个账号就没得用；
+        #    而删新建的是对的（smailr 有 100 个邮箱上限）。
+        rec.mail_reused = bool(getattr(mail, "reused", False))
         if not rec.timings.get("mailbox_ms"):
             rec.timings["mailbox_ms"] = int((time.time() - t0) * 1000)
         rec.mark_ok("mailbox")

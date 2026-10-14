@@ -126,6 +126,12 @@ class AccountRecord:
     password: str = ""
     # 这个账号用的是哪个收信域名（域名维度限流的记账维度，见 config）。
     mail_domain: str = ""
+    # 🔴 这个账号的收信邮箱是**复用**来的（而不是新建的）—— smailr 账号等级不够
+    #    时会走这条路（见 `src/smailr.py` 的复用逻辑）。
+    #    它直接影响清理：**复用的不能删** —— 那是用户预先建好的池子，删了下一个
+    #    账号就没得用（而删新建的是对的：smailr 有 100 个邮箱上限）。
+    #    所以这个事实必须**进台账**，而不只活在内存里。
+    mail_reused: bool = False
     # 控制台账号标识（来自 `/api/user/self` 与登录响应里的 `user`）。
     user_id: str = ""
     user_uuid: str = ""
@@ -216,6 +222,7 @@ class AccountRecord:
             "email": self.email,
             "password": self.password,
             "mail_domain": self.mail_domain,
+            "mail_reused": self.mail_reused,
             "user_id": self.user_id,
             "user_uuid": self.user_uuid,
             "display_id": self.display_id,

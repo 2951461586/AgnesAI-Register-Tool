@@ -13,6 +13,7 @@
     quota.py      本地注册配额保护（爆炸半径上限，不是服务端权威计量）
     mailbox.py    邮箱源注册表（**按域名派发**到对应的客户端）
     catchmail.py  catchmail.io 邮箱源（第二个源；公共域名 = **共享窗口**）
+    smailr.py     smailr.com 邮箱源（第三个源；4 个域名 + **成功落库后删邮箱**）
     jsonlstore.py JSONL 状态存储（**唯一实现**：追加 / 宽容读取 / 原子重写）
     windowstore.py 滑动窗口事件存储（**跨进程持久化**，与服务端两道窗口同构）
     report.py     批量收尾报告（纯展示，依赖注入，不 import 上层）
