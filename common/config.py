@@ -102,13 +102,23 @@ WORKER_DOMAIN = os.getenv("AR_WORKER_DOMAIN", "").strip()
 #    它**按域名**计 —— 用**全新的出口 IP** 打已用过的域名仍然命中。
 #    所以"多出口"只解决 IP 维度那一半，另一半要靠**换收信域名**。
 #
-# 🔴 Agnes 还有一道**域名白名单**（实测，同一台 Worker 的 7 个域名里）：
-#     允许   ：own.example / sub.own.example / own2.example
-#     明确拒 ：own4.example / own5.example / own6.example
+# 🔴 Agnes 还有一道**域名白名单**（实测 2026-10-13 首测 / 2026-10-14 复测）：
+#     允许（4 个）：own.example / sub.own.example / own2.example / own3.example
+#     明确拒（3 个）：own4.example / own5.example / own6.example
 #              → `400 This email domain looks invalid or abusive and is not
 #                 allowed for registration`
-#     未测清 ：own3.example（测到的是 IP 限流，不是域名拒绝）
-#     ⚠ 白名单是**平台侧**的、随时可能变。别把"允许"当承诺。
+#
+#     🔴 **域名数是吞吐的硬上限**：域名维度 2 格 = 1 个账号（见
+#       `DOMAIN_MAX_PER_WINDOW`），所以可用域名数直接决定每小时能跑几个。
+#       把被拒的域名加进 `AR_MAIL_DOMAINS` 只会拿到确定性的 `rejected`，
+#       还会白烧一格 IP 窗口 —— **没有收益，只有损失**。
+#
+#     ⚠ 白名单是**平台侧**的、随时可能变。别把"允许"当承诺；换域名池之前
+#       先跑 `tools/probes/probe_domains.py`（⚠ 消耗注册窗口）。
+#
+#     ⚠ `own3.example` 首测（10-13）记为"未测清" —— 当时撞到的是 **IP 限流**，
+#       不是域名拒绝。10-14 复测确认**允许**。这正是"未测清 ≠ 被拒"的例子：
+#       把限流当成域名被拒，就会白白丢掉一个可用域名。
 #
 # 取值来源：`AR_MAIL_DOMAINS`（逗号分隔）> `AR_WORKER_DOMAIN`（单个）。
 # 换域名池之前先跑 `tools/probes/probe_domains.py`（⚠ 消耗注册窗口）。
