@@ -23,9 +23,11 @@
 两者都要，且**不能互相替代**：服务端有两道窗口，而一个"只计成功"的累计计数
 既拦不住失败重试（81 条失败全不计），也拦不住"每次进程都从零"。
 
-🔴 存储形态刻意与 `quota.py` **同构**（JSONL 追加 + 机会式压缩），理由也一样：
-   追加一行是原子的，不需要"读整个文件 → 改 → 原子替换"。后者在两个进程同时
-   跑时必然丢事件，而丢事件的方向是**更松** —— 正是最不该出错的方向。
+🔴 存储层是 `jsonlstore.JsonlStore`（**唯一实现**）。本模块只留**策略**：
+   保留期取"最长那道窗口"、压缩阈值按字节、键必须非空。
+   ⚠ 历史：本模块的存储代码原本是**照抄** `quota.py` 的 —— 那是"意外重复"，
+   与 `report.py` 那种"故意不带项目内依赖"的重复完全不同。抽出去之后，
+   宽容读取的 `except ValueError` 白名单也从**两条变一条**。
 
 🔴 写失败只告警、不抛（与 `quota.py` 同策略，与 `ledger.py` **相反**）：
    窗口状态是**加速器**，丢了只让下一轮更松，不该让整批任务失败。
@@ -36,14 +38,12 @@
    （脱敏后的 host:port + 短哈希），本模块对键的内容不作任何假设。
 """
 
-import json
-import os
 import time
 from pathlib import Path
 
 from common import config
 
-from . import fsutil
+from . import jsonlstore
 
 # 环境变量覆盖（与 `AR_QUOTA_STATE` 同构）—— 测试靠它做隔离。
 # 🔴 不隔离的话，跑一次测试就会往**真实**窗口文件里写事件，从而影响下一次
@@ -61,58 +61,30 @@ COMPACT_MIN_BYTES = 64_000
 # （见 `tests/test_pipeline.py::test_window_state_is_isolated_from_real_state_dir`）。
 ROOT = Path(__file__).resolve().parents[1]
 
+_STORE = jsonlstore.JsonlStore(
+    STATE_ENV, ROOT / "state" / "register_windows.jsonl", label="窗口状态"
+)
+
+# `_as_ts` 保留为模块级别名：外部（含用例）读它比读 `_STORE.as_ts` 自然。
+_as_ts = jsonlstore.as_ts
+
 
 def state_path() -> Path:
-    """窗口状态文件。`AR_WINDOW_STATE` 可覆盖（测试靠它隔离）。
-
-    ⚠ 在**调用时**读环境变量，不受导入顺序影响 —— 与 `config` 的常量不同，
-      这样测试可以在 import 之后改环境变量而不必重载模块（同 `quota.state_path`）。
-    """
-    override = (os.getenv(STATE_ENV) or "").strip()
-    if override:
-        return Path(override).expanduser()
-    return ROOT / "state" / "register_windows.jsonl"
-
-
-def _as_ts(raw) -> float:
-    """宽容地取时间戳。**坏值退回 0**，不抛（理由同 `quota._as_ts`）。
-
-    ⚠ 这个文件是**本地**的、可能被人手改过。一个 `"ts": "yesterday"` 不该让
-      整批任务炸在 `float()` 上 —— 退回 0 的后果只是这条记录被当成窗口外，
-      是安全方向的降级。
-    """
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return 0.0
+    """窗口状态文件。`AR_WINDOW_STATE` 可覆盖（测试靠它隔离）。"""
+    return _STORE.path()
 
 
 def _read_entries() -> list[dict]:
-    """读状态文件 → 条目列表。**读不到就返回空**，不抛。
+    """读状态文件 → **有 `key` 的**条目列表。**读不到就返回空**，不抛。
 
     🔴 静默降级是有意的，代价必须说清楚：文件读不出来 ⇒ 窗口看起来是空的
-      ⇒ 闸门放行。这就是"状态文件是加速器、不是数据"那条约定（见 `fsutil`）。
-      真正的高危失败在**台账**那一侧，那边是让它抛的。
+      ⇒ 闸门放行。这就是"状态文件是加速器、不是数据"那条约定
+      （见 `jsonlstore` 的模块 docstring，以及它与 `ledger` 严格读取的对比）。
+
+    ⚠ 过滤"必须有 `key`"是本模块的**策略**：没有键的行不参与任何桶，
+      否则会污染所有桶（而 `JsonlStore.read()` 只管"是不是合法 JSON 对象"）。
     """
-    p = state_path()
-    if not p.is_file():
-        return []
-    try:
-        text = p.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    out: list[dict] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            d = json.loads(line)
-        except ValueError:
-            continue  # 半截行（写盘时被杀）只丢这一行，不丢整个文件
-        if isinstance(d, dict) and d.get("key"):
-            out.append(d)
-    return out
+    return [e for e in _STORE.read() if e.get("key")]
 
 
 def events(key: str, window_s: float, now: float | None = None) -> list[float]:
@@ -135,22 +107,9 @@ def events(key: str, window_s: float, now: float | None = None) -> list[float]:
 
 def record(key: str, ts: float | None = None) -> None:
     """追加一条事件。**写失败只告警，不抛**（见模块 docstring）。"""
-    p = state_path()
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(
-            {"ts": round(time.time() if ts is None else ts, 3), "key": key},
-            ensure_ascii=False,
-        )
-        with p.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except OSError as ex:
-        print(
-            f"  ⚠ 窗口状态写不进去（{type(ex).__name__}: {ex}）"
-            f"—— 本次不记账，闸门会偏松（下一轮可能撞服务端墙）"
-        )
-        return
-    _maybe_compact()
+    ok = _STORE.append({"ts": round(time.time() if ts is None else ts, 3), "key": key})
+    if ok:
+        _maybe_compact()
 
 
 def drop(key: str, n: int = 1) -> None:
@@ -178,13 +137,7 @@ def drop(key: str, n: int = 1) -> None:
         return
     newest = sorted(mine, key=lambda i: (_as_ts(entries[i].get("ts")), i))[-n:]
     drop_idx = set(newest)
-    keep = [e for i, e in enumerate(entries) if i not in drop_idx]
-    text = "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in keep)
-    try:
-        fsutil.atomic_write_text(state_path(), text)
-    except OSError as ex:
-        # 不抛：归还失败只是"那一格多占一会儿"，而它自愈（窗口滑出）。
-        print(f"  ⚠ 窗口预留归还失败（{type(ex).__name__}: {ex}）—— 那一格会一直占着")
+    _STORE.rewrite([e for i, e in enumerate(entries) if i not in drop_idx])
 
 
 def _maybe_compact() -> None:
@@ -211,8 +164,4 @@ def _maybe_compact() -> None:
     keep = [e for e in entries if _as_ts(e.get("ts")) > cutoff]
     if len(keep) * 2 > len(entries):
         return  # 过期的不够多，压缩收益抵不上重写的代价
-    text = "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in keep)
-    try:
-        fsutil.atomic_write_text(state_path(), text)
-    except OSError as ex:
-        print(f"  ⚠ 窗口状态压缩失败（{type(ex).__name__}: {ex}）—— 保持原文件")
+    _STORE.rewrite(keep)

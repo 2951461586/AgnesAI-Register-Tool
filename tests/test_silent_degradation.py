@@ -170,19 +170,16 @@ def test_loop_allowlist_entries_are_not_stale():
 
 # (相对路径, 函数名, 异常类型名) —— 这里的"吞掉"是**有意**的。
 EXCEPT_ALLOWED = {
-    ("src/quota.py", "_read_entries", "ValueError"): (
-        "半截 JSONL 行（写盘时被杀）只丢**这一行**，不丢整个文件。配额计数是"
-        "**加速器不是数据**（丢了只影响下一轮的保守程度）—— 这条约定写在"
-        "`fsutil` 的 docstring 与 `quota._read_entries` 自己的注释里。"
-        "⚠ 与之相对，**台账**那一侧的读源必须抛（见 `load_read_source`）。"
-    ),
-    ("src/windowstore.py", "_read_entries", "ValueError"): (
-        "与上面 `quota._read_entries` **完全同构**：滑动窗口的事件文件是 JSONL，"
-        "半截行（写盘时被杀 / 被人手改）只丢那一行。窗口状态与配额计数一样是"
-        "**加速器不是数据** —— 丢一行的后果是闸门**偏松**（下一轮可能撞服务端墙），"
-        "而让它抛的后果是**整批任务起不来**。两害相权取轻，且偏松那一侧与"
-        "`_read_entries` 文件读不出来时返回 `[]` 是同一套降级策略。"
-        "⚠ 与之相对，**台账**那一侧的读源必须抛（见 `load_read_source`）。"
+    ("src/jsonlstore.py", "read", "ValueError"): (
+        "半截 JSONL 行（写盘时被杀 / 被人手改）只丢**这一行**，不丢整个文件。"
+        "**状态文件是加速器不是数据**：丢一行的后果是闸门**偏松**（下一轮可能"
+        "撞服务端墙），而让它抛的后果是**整批任务起不来** —— 两害相权取轻。"
+        "⚠ 与之相对，**台账**那一侧的读源必须抛（见 `ledger.load_read_source`）——"
+        "混用这两者会出真实事故（拿宽容读取器当合并基准 ⇒ 台账被静默抹光）。"
+        "\n    📌 这里原本有**两条**白名单（`src/quota.py::_read_entries` 与"
+        "`src/windowstore.py::_read_entries`）—— 因为那是同一套存储代码抄了两遍。"
+        "抽成 `jsonlstore` 之后只剩这一条，而这正是白名单腐烂测试（下面那条）"
+        "逼出来的：它先报新文件未登记，再报旧条目已失效。"
     ),
 }
 
