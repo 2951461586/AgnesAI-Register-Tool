@@ -425,6 +425,22 @@ def _register_backoff_s() -> float:
     return max(5.0, min(45.0, max(per_ip, per_dom)))
 
 
+def _slot_has_room(slot: str | None) -> bool:
+    """这个出口的 IP 窗口**现在**还有名额吗（只查询，不消费）。
+
+    🔴 存在的理由与 `_pick_domain_with_room` **完全同形**，只是换了维度：
+      `SlotPool` 的"最少使用"是**进程内**计数，新进程启动时全为 0 ⇒ 排序
+      退化成列表顺序 ⇒ 先借到上一批刚打满的出口，白转一圈才以 `quota_guard`
+      收场。实测（2026-10-14）：一批 7 个跑完后立刻再跑，4 次尝试全撞在
+      满窗口上，而池里其实还有 3 个出口是空的。
+
+    ⚠ 用 `LIMITER_MAX_WAIT_S` 作为判据（而不是 `room() > 0`），因为
+      "还剩 1 格但要等 59 分钟"在本项目的语义里就是**不可用** ——
+      `provision` 的重试循环用的正是同一个阈值。
+    """
+    return register_limiter(slot).wait_time() <= config.LIMITER_MAX_WAIT_S
+
+
 def _rotate_slot(slot_pool, holder, *, error: str) -> bool:
     """把这条链换到**另一个出口**。换成了返回 `True`。
 
@@ -440,7 +456,9 @@ def _rotate_slot(slot_pool, holder, *, error: str) -> bool:
         return False
     old = holder.proxy
     try:
-        new = slot_pool.acquire(timeout=5)
+        # 🔴 带 `prefer=_slot_has_room`：换出口的目的是换一张**新的窗口**，
+        #    而换到一个同样满的出口等于没换（还白烧一次尝试）。
+        new = slot_pool.acquire(timeout=5, prefer=_slot_has_room)
     except SlotPoolEmpty:
         return False
     if not new or new == old:

@@ -94,7 +94,7 @@ class SlotPool:
         return bool(self._all)
 
     # ── 借出 / 归还 ────────────────────────────────────────────
-    def acquire(self, timeout: float | None = None):
+    def acquire(self, timeout: float | None = None, prefer=None):
         """借一个槽位（**最少使用优先**）。空池返回 `None`。
 
         🔴 最少使用优先，而不是"按顺序取第一个空闲的"：注册限流是**按出口**的，
@@ -103,6 +103,20 @@ class SlotPool:
 
         ⚠ 排序键里带 `last_used`：`used` 相同时让"最久没用过的"先上，
           这样新加的槽位不会一直排在队尾。
+
+        🔴 `prefer(url)` 的返回值被**前置**到排序键上（真值优先）。
+          存在的理由是 **`used` 是进程内计数**：新进程启动时全是 0 ⇒ 排序
+          退化成**列表顺序** ⇒ 它会先借到上一批刚把窗口打满的那几个，
+          白转一圈才发现打不动。
+          实测（2026-10-14）：一批 7 个跑完后立刻再跑，4 次尝试全撞在满窗口上，
+          以 `quota_guard` 收场 —— 而池子里其实还有 3 个出口是空的。
+          调用方传 `prefer` 去查**落盘**的窗口状态（`windowstore`），
+          把"进程内记忆"补成"跨进程记忆"。
+
+        ⚠ 回调是在**池锁内**被调用的（排序发生在 `with self._cv` 里）。
+          所以它必须是**纯查询**（本项目传的是 `wait_time()`，会读 `state/` 的
+          小文件）。锁内做 I/O 是刻意的取舍：放锁排序会让两个线程
+          同时看到"这个槽位可用"，然后一起拿走。
         """
         if not self._all:
             return None
@@ -116,7 +130,16 @@ class SlotPool:
                         f"等 {limit:.0f}s 没等到空闲槽位（{len(self._all)} 个都在用）"
                     )
                 self._cv.wait(remain)
-            self._free.sort(key=lambda u: (self._stats[u].used, self._stats[u].last_used))
+            if prefer is None:
+                self._free.sort(key=lambda u: (self._stats[u].used, self._stats[u].last_used))
+            else:
+                self._free.sort(
+                    key=lambda u: (
+                        not prefer(u),
+                        self._stats[u].used,
+                        self._stats[u].last_used,
+                    )
+                )
             url = self._free.pop(0)
             self._stats[url].used += 1
             self._stats[url].last_used = time.time()

@@ -222,9 +222,16 @@ class SmailrClient:
           而不是"属于哪个源"。两件事，别合并。
         """
         d = (domain or "").lower()
+        # 🔴 **显式配了 id 就优先用它** —— 哪怕它是"默认域名"。
+        #    HAR 实测（2026-10-14）：账号的默认域名是个**要等级 4** 的域名 ⇒
+        #    省略 `domain_id` 会撞 403；而带上该域名的真 `domain_id` 就能建成
+        #    （`loc.cc` / `mail.nodeloc.cc` / `nodeloc.cc` 三个域名都是 201）。
+        #    ⇒ "能省略"只是**没配 id 时**的兜底，不该盖过显式配置。
+        did = config.SMAILR_DOMAIN_IDS.get(d)
+        if did:
+            return did
         if d == (config.SMAILR_DEFAULT_DOMAIN or "").lower():
             return ""
-        did = config.SMAILR_DOMAIN_IDS.get(d)
         if not did:
             raise SmailrError(
                 f"smailr 域名 @{d} 不是默认域名，必须在 AR_SMAILR_DOMAIN_IDS 里给它 domain_id"
