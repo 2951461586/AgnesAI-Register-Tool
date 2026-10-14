@@ -72,6 +72,40 @@ def test_entries_without_key_are_ignored():
     assert W.events("ip:a", 1000.0, now=300.0) == []
 
 
+def test_drop_removes_newest_events_for_that_key_only():
+    """`drop` 归还**指定键**上最新的 n 条，不碰别的键。
+
+    🔴 它是"域名预留没用上 ⇒ 还回去"的底层实现。还错了键就等于把别的出口/
+      域名的名额偷走 —— 那会让闸门**偏松**，而偏松会撞服务端墙。
+    """
+    W.record("ip:a", 1.0)
+    W.record("ip:b", 2.0)
+    W.record("ip:a", 3.0)
+    W.drop("ip:a", 1)
+    assert W.events("ip:a", 1000.0, now=4.0) == [1.0]  # 最新那条（3.0）被丢
+    assert W.events("ip:b", 1000.0, now=4.0) == [2.0]  # 别的键一根毛都没动
+
+    # 多还要安全（不抛、不倒扣）
+    W.drop("ip:a", 99)
+    assert W.events("ip:a", 1000.0, now=4.0) == []
+    # 不存在的键 / n<=0 不抛（幂等）
+    W.drop("nope", 1)
+    W.drop("ip:b", 0)
+    assert W.events("ip:b", 1000.0, now=4.0) == [2.0]
+
+
+def test_drop_with_identical_timestamps_removes_the_newest():
+    """同一瞬间连占两格时，`drop` 必须丢掉**后写进去的**那一格。
+
+    ⚠ 时间戳相同时不能只按 `ts` 排序（全相等 ⇒ 顺序不确定），所以实现里
+      带了原文件下标做次级键。这里用同一个 ts 钉住那条约定。
+    """
+    W.record("ip:a", 5.0)
+    W.record("ip:a", 5.0)
+    W.drop("ip:a", 1)
+    assert W.events("ip:a", 1000.0, now=6.0) == [5.0]  # 剩 1 条，不是 0 也不是 2
+
+
 def test_compaction_keeps_in_window_entries(monkeypatch):
     """压缩只丢窗口外的条目，且**按最长的那道窗口**保留。
 

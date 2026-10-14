@@ -48,8 +48,8 @@ python run.py --quiet                  # 只输出汇总
 | `AR_PASSWORD_LEN` | — | 默认 16。服务端硬要求 ≥ 8 |
 | `AR_KEY_NAME` | — | 创建的 API Key 名称，默认 `auto` |
 | `AR_VERIFY_MODEL` / `AR_VERIFY_CHAT` | — | key 校验用的模型 / 是否真打一次 chat |
-| `AR_REGISTER_MAX_PER_WINDOW` / `AR_REGISTER_WINDOW_S` | — | **按出口**的注册尝试限速（默认 2 次 / **3600s**，**保守值**，见下） |
-| `AR_DOMAIN_MAX_PER_WINDOW` / `AR_DOMAIN_WINDOW_S` | — | **按收信域名**的注册尝试限速（默认 2 次 / 3600s）。与 IP 维度**分开配** |
+| `AR_REGISTER_MAX_PER_WINDOW` / `AR_REGISTER_WINDOW_S` | — | **按出口**的注册尝试限速（默认 **2 次** = **1 个账号** / **3600s**，**保守值**，见下）。⚠ 计的是**请求**，不是一个账号一枪 |
+| `AR_DOMAIN_MAX_PER_WINDOW` / `AR_DOMAIN_WINDOW_S` | — | **按收信域名**的注册尝试限速（默认 **2 次** = **1 个账号** / 3600s）。与 IP 维度**分开配** |
 | `AR_LIMITER_MAX_WAIT_S` | — | 本地闸门「等不起就换维度」阈值（秒，默认 20） |
 | `AR_REG_QUOTA_MAX` / `AR_REG_QUOTA_WINDOW_H` | — | **爆炸半径上限**（默认 30 / 24h），不是服务端配额 |
 | `AR_PROXY` / `AR_PROXY_SLOTS(_FILE)` / `AR_PROXY_SLOT_TIMEOUT` | — | 出口代理与槽位池（多出口并发） |
@@ -72,6 +72,10 @@ Agnes 对**注册尝试**（`/api/verification` 与 `/api/user/register`，**共
 
 🔴 它们是 **400，不是 429**。所以：
 
+* 🔴 **窗口计的是「请求」，而一个账号要打两枪**（发码 + 注册共用同一张计数）
+  ⇒ 默认的 `2` 实际只放行 **1 个账号 / 窗口**，不是 2 个。想跑 N 个账号，
+  两个维度的上限都要 ≥ `2N`。这一点曾被读成"2 个账号"，直接导致"码烧了、
+  注册进不去"（见下面第 4 点）；
 * **只调大 `--producers` 不会提高吞吐** —— 那是同一张窗口里的名额；
 * 提高吞吐要**两个杠杆一起上**：`AR_PROXY_SLOTS`（N 个出口 = N 张 IP 窗口）
   **和** `AR_MAIL_DOMAINS`（M 个域名 = M 张域名窗口）。只加一个，会立刻撞上
@@ -81,8 +85,14 @@ Agnes 对**注册尝试**（`/api/verification` 与 `/api/user/register`，**共
 
 ⚠ **窗口长度尚未测准**（已知 **>45 分钟** —— 见
 [`docs/protocol.md`](docs/protocol.md)「限流：实测与未测」，那是这条事实的
-**唯一真源**）。所以本地闸门取保守值（默认 2 次 / **3600s**）。测准它的方法
-见 `tools/probes/probe_register_limit.py`。
+**唯一真源**）。所以本地闸门取保守值（默认 **2 次 / 3600s**，= 1 个账号）。
+测准它的方法见 `tools/probes/probe_register_limit.py`。
+
+🔴 **域名维度换不动，所以本地必须一次占够两枪**（`src/pipeline.py` 的
+`REQUESTS_PER_ACCOUNT`）。注册时域名已经定死在邮箱里 —— 只留一格就发码，
+等于"码烧了、注册却进不去"。所以 `provision` 会先确认域名窗口装得下
+**两枪**，装不下就**一枪都不发**（`skipped`），而不是先烧了再说。
+实测依据：一次 5 账号跑批里 3 个就是这个形态（两个域名各 2/2 打满）。
 
 ### 2. 台账是账号的**唯一副本**
 

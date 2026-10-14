@@ -103,6 +103,19 @@ STAGES = ("mailbox", "code", "register", "login", "key", "app", "verify")
 #    撞上限流墙时继续打只是白烧请求，而且**加深**服务端对这张 IP 的印象。
 QUOTA_STREAK_STOP = 2
 
+# 一个账号要打几枪**注册类**请求（`/api/verification` + `/api/user/register`）。
+#
+# 🔴 这个数必须写下来，因为**服务端两道窗口都是按"请求"计的，而人想的是
+#    "账号"**：`AR_DOMAIN_MAX_PER_WINDOW=2` 的真实含义是**每小时 1 个账号**，
+#    不是 2 个 —— 一个账号要占两格。文档与 .env 里都写着"2 次"，很容易被
+#    读成"2 个账号"。
+#
+# 🔴 它还是域名维度**必须一次占够**的格数：注册时域名已定死在邮箱里、换不了，
+#    所以"只留 1 格就发码"= 码烧了、注册进不去。
+#    实测（2026-10-14，5 账号跑批）：3/5 就是这个形态 ——
+#    两个域名各 2/2 打满，而两条记录是 `code='ok(5 polls)'` + `register='failed'`。
+REQUESTS_PER_ACCOUNT = 2
+
 # 密码字符集。**刻意不用 `string.punctuation`**：里面含 `"` / `\` / `'` / `` ` ``，
 # 而密码会被写进 JSON 台账、有时还要手打进浏览器 —— 那些字符在每一条路径上
 # 都要被转义一次，是纯粹的麻烦来源。
@@ -369,6 +382,15 @@ class Ticket:
     # 这个账号的收信域名。消费者注册时也要过**域名维度**的闸门，
     # 所以它必须跟着 ticket 走完两段。
     domain: str = ""
+    # ── 域名维度的**预留**（见 `provision` 的注释）──────────────────
+    # `reserved_domain` 这个域名上，有 `domain_reserved` 格是留给这条账号的
+    # （发码 1 格 + 注册 1 格）。两者都是空/0 = 没有预留。
+    #
+    # 🔴 为什么预留要跟着 ticket 走：注册在**另一段**（消费者）发生，而那时
+    #    域名已经定死。不把"我已经替你占好了"这个事实传过去，消费者就只能
+    #    重新去抢 —— 而抢不到就变成了"码烧了、账号拿不到"。
+    reserved_domain: str = ""
+    domain_reserved: int = 0
 
 
 # ── 按出口的滑动窗口限速器 ────────────────────────────────────────
@@ -460,6 +482,83 @@ class SlidingWindow:
             if len(times) < self.max_events:
                 return 0.0
             return max(0.0, (times[0] + self.window_s) - now)
+
+    def room(self) -> int:
+        """还剩几格（**不消费**）。用于"这条账号需要 n 格，装得下吗"。"""
+        with self._lock:
+            return max(0, self.max_events - len(self._events(time.time())))
+
+    def acquire_many(self, n: int, max_wait: float | None = None) -> float:
+        """一次占 `n` 格（**原子**：检查与记账在同一把锁里）。
+
+        🔴 为什么必须"一次占 n 格"，而不是调 n 次 `acquire()`：
+          一个账号要打 `REQUESTS_PER_ACCOUNT` 枪注册类请求，而**域名维度在
+          注册时换不了**（邮箱已定死）。分两次占的话，第一次成功、第二次可能
+          已被别的线程/进程抢走 —— 而那时验证码已经发出去了：**码烧了、
+          账号拿不到**。
+          实测（2026-10-14，5 账号跑批）：3 个账号 `code='ok(5 polls)'` 而
+          `register='failed' [quota_guard]`，两个域名各 2/2 打满 —— 就是这个竞态。
+
+        原子占 n 格把这件事变成"**要么 n 格都拿到、要么一枪不发**"。
+
+        ⚠ 睡醒后**再查一次**：睡着的这段时间里别的线程/进程可能已经把名额抢走。
+          那次不占格、直接抛 `WindowBusy` —— 占一半比不占更坏。
+        """
+        n = max(1, int(n))
+        with self._lock:
+            now = time.time()
+            times = self._events(now)
+            wait = 0.0
+            if len(times) + n > self.max_events:
+                if not times:
+                    # 上限本身就装不下 n 格（配置矛盾）—— 等多久都没用。
+                    raise WindowBusy(
+                        f"本地窗口上限 {self.max_events} 格装不下 {n} 格（配置矛盾）",
+                        wait_s=0.0,
+                    )
+                wait = (times[0] + self.window_s) - now
+                if wait > 0:
+                    if max_wait is not None and wait > max_wait:
+                        raise WindowBusy(
+                            f"本地滑动窗口装不下 {n} 格"
+                            f"（已用 {len(times)}/{self.max_events}，还要等 {wait:.0f}s，"
+                            f"封顶 {max_wait:g}s，等不起）",
+                            wait_s=wait,
+                        )
+                    time.sleep(wait)
+                now = time.time()
+                times = self._events(now)
+                if len(times) + n > self.max_events:
+                    raise WindowBusy(
+                        f"本地滑动窗口装不下 {n} 格（睡醒后仍只剩 "
+                        f"{self.max_events - len(times)} 格）",
+                        wait_s=max(0.0, (times[0] + self.window_s) - now) if times else 0.0,
+                    )
+            for _ in range(n):
+                if self.key:
+                    _windows.record(self.key, now)
+                else:
+                    times.append(now)
+            if not self.key:
+                self._times = times
+            return max(0.0, wait)
+
+    def release(self, n: int = 1) -> None:
+        """归还 `n` 格（预留没用上时）。**不抛**（失败只告警）。
+
+        🔴 与 `acquire_many` 配对：账号在发码之后死掉（网络 / 等不到码 /
+          注册被拒）时，为它预留的那一格不能一直占着 —— 一个域名一小时只有
+          2 格，泄漏几次就把域名锁死。
+        """
+        n = max(0, int(n))
+        if n <= 0:
+            return
+        with self._lock:
+            if self.key:
+                _windows.drop(self.key, n)
+                return
+            for _ in range(min(n, len(self._times))):
+                self._times.pop()
 
 
 class WindowBusy(Exception):
@@ -555,12 +654,44 @@ def domain_limiter(domain: str) -> SlidingWindow:
         return lim
 
 
+def _release_domain_reservation(ticket: Ticket) -> None:
+    """把这条账号**没用上**的域名预留还回去。
+
+    🔴 不还的后果：预留是"占着格子"的，而一个域名一小时只有 2 格。账号在
+      发码之后死掉（网络 / 等不到码 / 注册被拒）时那一格不能一直占着 ——
+      泄漏几次就把域名锁死，现象是"什么都没干却被限流"。
+
+    ⚠ 幂等：重复调用是安全的（调完两个字段都清空）。所以它在
+      `run_batch` 的**所有**收尾路径上都可以无脑调一次。
+    """
+    if ticket.reserved_domain and ticket.domain_reserved > 0:
+        domain_limiter(ticket.reserved_domain).release(ticket.domain_reserved)
+    ticket.reserved_domain = ""
+    ticket.domain_reserved = 0
+
+
 def pick_domain(domains, *, exclude: str | None = None) -> str:
     """在域名池里挑一个（**最少使用优先**），尽量避开 `exclude`。
 
     与槽位池同一个理由：轮换取用会让某个域名先把窗口用满，总吞吐反而更低。
     """
     cands = [d for d in (domains or []) if d != exclude] or list(domains or [])
+    if not cands:
+        return ""
+    with _LIMITER_LOCK:
+        d = min(cands, key=lambda x: (_DOMAIN_USED.get(x, 0), x))
+        _DOMAIN_USED[d] = _DOMAIN_USED.get(d, 0) + 1
+        return d
+
+
+def _pick_domain_with_room(domains, *, exclude: str, need: int) -> str:
+    """挑一个**装得下 `need` 格**的域名（最少使用优先）。没有就返回 `""`。
+
+    🔴 与 `pick_domain` 的差别：那个只按"最少使用"挑，会挑到一个**同样满**的
+      域名 ⇒ 白白多转一圈，而每转一圈都消耗一次尝试（最后以 `quota_guard`
+      收场，日志里看上去像"域名换了个遍都不行"）。这个先筛"装得下"。
+    """
+    cands = [d for d in (domains or []) if d != exclude and domain_limiter(d).room() >= need]
     if not cands:
         return ""
     with _LIMITER_LOCK:
@@ -659,9 +790,9 @@ def provision(
     sent_at = 0
     t1 = time.time()
     for attempt in range(config.REGISTER_RETRIES + 1):
-        # ── 两个维度的本地闸门 ────────────────────────────────────
-        # 🔴 **先看要等多久再决定**：窗口可能是小时级的，抱着闸门 sleep 会把
-        #    批量拖死。等不起就换维度（换出口 / 换域名）。
+        # ── IP 维度（按出口）：只要 1 格 ───────────────────────────
+        # 🔴 这里**不需要**一次占两格：IP 维度在注册时**换得动**（10 个出口），
+        #    所以 `finish` 撞满时可以换出口。换不动的是**域名**维度 —— 见下。
         ip_wait = register_limiter(ticket.proxy).wait_time()
         if ip_wait > config.LIMITER_MAX_WAIT_S:
             old = ticket.proxy
@@ -670,23 +801,60 @@ def provision(
                 ticket.client = client_factory(ticket.proxy)
                 log(f"本地 IP 窗口要等 {ip_wait:.0f}s → 换出口")
                 continue
-        dom_wait = domain_limiter(domain).wait_time()
-        if dom_wait > config.LIMITER_MAX_WAIT_S:
-            nxt = pick_domain(domains, exclude=domain)
-            if nxt and nxt != domain:
-                rotated_domains.append(domain)
-                domain = nxt
-                log(f"本地域名窗口要等 {dom_wait:.0f}s → 换域名 {domain}")
-                continue
-        need = max(ip_wait, dom_wait)
+
+        # ── 域名维度：**必须给这条账号占够 REQUESTS_PER_ACCOUNT 格** ─
+        # 🔴 一个账号要打两枪注册类请求，而两枪**共用**同一张域名计数
+        #    （docs/protocol.md §3）；注册那一枪的域名已经定死在邮箱里，
+        #    **换不了**。所以"只留 1 格就发码"= 码烧了、注册进不去。
+        dom = domain_limiter(domain)
+        if ticket.reserved_domain != domain:
+            # 首次，或刚从别的域名换过来：旧域名上没用上的预留先还回去。
+            _release_domain_reservation(ticket)
+        # 当前域名上还差几格：本次发码 1 格 + 将来注册 1 格。
+        # 🔴 用"**补足**到 REQUESTS_PER_ACCOUNT"而不是"每次重试都再占 2 格"：
+        #    发码被服务端限流后重试会把预留吃掉一格，这时只补 1 格就够 ——
+        #    而无脑再占 2 格会把注册那一格也挤掉，等于白重试（码烧了还是进不去）。
+        need = REQUESTS_PER_ACCOUNT - ticket.domain_reserved
         if need > 0:
-            time.sleep(min(need, _register_backoff_s()))
+            if dom.room() < need:
+                # 装不下 ⇒ **一枪都不发**。先试换一个有位置的域名；
+                # 换不动（都满 / 没别的域名）就交给调用方，**不烧码**。
+                nxt = _pick_domain_with_room(domains, exclude=domain, need=need)
+                if nxt:
+                    rotated_domains.append(domain)
+                    domain = nxt
+                    log(f"域名窗口装不下 {need} 枪 → 换域名 {domain}")
+                    continue
+                raise WindowBusy(
+                    f"域名窗口装不下 {need} 枪，也没有别的域名可换（{domain}）"
+                    f"—— 不发验证码，避免烧码",
+                    wait_s=dom.wait_time(),
+                )
+            need_wait = max(ip_wait, dom.wait_time())
+            if need_wait > 0:
+                time.sleep(min(need_wait, _register_backoff_s()))
+            try:
+                dom.acquire_many(need, config.LIMITER_MAX_WAIT_S)
+            except WindowBusy:
+                # 预检与 acquire 之间被别的线程/进程抢光了 —— 重试，**不烧码**。
+                if attempt >= config.REGISTER_RETRIES:
+                    raise
+                time.sleep(_register_backoff_s())
+                continue
+            ticket.reserved_domain = domain
+            ticket.domain_reserved += need
+
         # 🔴 封顶传 `LIMITER_MAX_WAIT_S`：上面的预检与这里的 acquire 之间，
         #    别的线程可能刚好把窗口打满。没有封顶的话这一次 acquire 会抱着
         #    长度未知的窗口（域名维度默认 3600s）睡死在锁里 —— 整条账号链
         #    挂住。撞封顶抛 `WindowBusy`，由本循环 / 调用方按"等不起"处置。
-        waited += register_limiter(ticket.proxy).acquire(config.LIMITER_MAX_WAIT_S)
-        domain_limiter(domain).acquire(config.LIMITER_MAX_WAIT_S)
+        try:
+            waited += register_limiter(ticket.proxy).acquire(config.LIMITER_MAX_WAIT_S)
+        except WindowBusy:
+            # 域名已经预留好了，但这一枪发不出去 ⇒ 把预留还回去再抛，
+            # 否则那 2 格会被一条根本没跑的账号白占一小时。
+            _release_domain_reservation(ticket)
+            raise
 
         # ── 建邮箱（每次重试都新建：换域名就得换地址）──────────────
         rec.enter("mailbox")
@@ -718,8 +886,9 @@ def provision(
         sent_at = now_ms()
         try:
             ticket.client.send_code(rec.email)
-            break
         except AgnesQuota as ex:
+            # 服务端**记了这一枪**（它回了限流，不是没收到）⇒ 预留里用掉一格。
+            ticket.domain_reserved = max(0, ticket.domain_reserved - 1)
             if attempt >= config.REGISTER_RETRIES:
                 raise
             # 🔴 **先看是哪个维度**：域名维度换出口没用，IP 维度换域名没用。
@@ -727,6 +896,8 @@ def provision(
             if _is_domain_limit(ex):
                 nxt = pick_domain(domains, exclude=domain)
                 if nxt and nxt != domain:
+                    # 换域名 ⇒ 旧域名上剩下的预留要还（它换不回来了）。
+                    _release_domain_reservation(ticket)
                     rotated_domains.append(domain)
                     domain = nxt
                     log(f"发码被**域名**限流 → 换域名 {domain}（{ex}）")
@@ -741,6 +912,10 @@ def provision(
             back = _register_backoff_s()
             log(f"发码被限流，退避 {back:.0f}s 后重试（{ex}）")
             time.sleep(back)
+            continue
+        # 发码成功：预留里用掉一格（这一枪），剩下一格留给 `finish` 的首次注册。
+        ticket.domain_reserved = max(0, ticket.domain_reserved - 1)
+        break
     else:
         # 🔴 循环**没有 `break`** 就结束了 ⇒ **一次验证码都没发出去**：
         #    每一次尝试都被上面的"本地闸门等不起 → 换维度"给 `continue` 掉了
@@ -756,6 +931,7 @@ def provision(
         #
         #    抛 `WindowBusy` ⇒ `classify` → `quota_guard` ⇒ 生产者按
         #    **`skipped`** 记账（且**不**计入配额尝试）—— 与语义一致。
+        _release_domain_reservation(ticket)
         raise WindowBusy(
             f"本地闸门把 {config.REGISTER_RETRIES + 1} 次尝试全部换掉了，"
             f"一个验证码请求都没发出去（IP / 域名窗口都满）"
@@ -806,7 +982,13 @@ def finish(ticket: Ticket, *, client_factory=None, slot_pool=None, log=_print) -
     for attempt in range(config.REGISTER_RETRIES + 1):
         # 注册同样消耗**两个维度**的窗口 —— 与发码同一套闸门。
         ip_wait = register_limiter(ticket.proxy).wait_time()
-        dom_wait = domain_limiter(ticket.domain).wait_time()
+        # 🔴 域名维度：第一枪用的是 `provision` **已经替我们占好**的那一格预留
+        #    —— 所以这时"窗口满"是正常的（满的就是我们自己的预留），不能拿它
+        #    当"等不起"。只有**重试**才需要新占格。
+        #    这条区分正是修"码烧了、注册进不去"的关键：不认预留，就会把已经
+        #    属于自己的名额当成别人的，白白把账号判死。
+        reserved = ticket.domain_reserved > 0
+        dom_wait = 0.0 if reserved else domain_limiter(ticket.domain).wait_time()
         if ip_wait > config.LIMITER_MAX_WAIT_S:
             old = ticket.proxy
             if _rotate_slot(slot_pool, ticket, error="local ip window full"):
@@ -822,7 +1004,11 @@ def finish(ticket: Ticket, *, client_factory=None, slot_pool=None, log=_print) -
         # 不能抱着 3600s 的域名窗口睡死。
         try:
             waited += register_limiter(ticket.proxy).acquire(config.LIMITER_MAX_WAIT_S)
-            domain_limiter(ticket.domain).acquire(config.LIMITER_MAX_WAIT_S)
+            if reserved:
+                # 用掉 provision 替我们占的那一格（预留变成"已用"）。
+                ticket.domain_reserved -= 1
+            else:
+                domain_limiter(ticket.domain).acquire(config.LIMITER_MAX_WAIT_S)
         except WindowBusy as ex:
             # 邮箱和验证码**已经发出去了**（不是"一个请求都没发"）⇒ 这是
             # failed 而不是 skipped。重试未用完就退避再来一次；用完就诚实
@@ -1153,6 +1339,8 @@ def run_batch(
             # 本地守卫主动中止（爆炸半径上限 / 滑动窗口等不起）⇒ **一个请求都
             # 没发** ⇒ skipped，不是 failed。两者对读者的含义完全不同：
             # skipped = "本来就没试"，failed = "试过了，不行"。
+            # ⚠ 归还域名预留（幂等）—— 不还就把域名锁死了。
+            _release_domain_reservation(ticket)
             rec.skip(ERR_QUOTA_GUARD, str(ex))
             slot_pool.release(slot, ok=None)
             record_out(rec)
@@ -1161,6 +1349,10 @@ def run_batch(
             kind = classify(ex)
             stage = _failed_stage(rec)
             rec.fail(kind, f"{type(ex).__name__}: {ex}" if kind == ERR_NETWORK else str(ex), stage)
+            # ⚠ 这条链已经死了（网络 / 等不到码 / 建不出邮箱）⇒ 归还域名预留。
+            #    这些是**常见**路径（实测 5 账号跑批里 2 条走这里），不还就等于
+            #    每失败一个账号就永久占掉半个域名。
+            _release_domain_reservation(ticket)
             # 只有 `network` 才可能真的是出口的问题 —— 把"邮箱已注册"记到
             # 出口头上，会让每个出口的失败数变成噪音，报告就没人看了。
             slot_pool.release(slot, ok=(False if kind == ERR_NETWORK else None), error=rec.error)
@@ -1208,6 +1400,9 @@ def run_batch(
                     say(f"  ✓ {rec.email} 注册成功（{_fmt_ms(rec)}）")
                 else:
                     say(f"  ✗ {rec.email} 失败 [{rec.error_kind}] {rec.error[:120]}")
+                # ⚠ 这条链已经跑完 ⇒ 没用上的域名预留还回去（幂等）。
+                #    典型场景：注册被拒 / 等不到码 —— 预留的"注册那一格"没花掉。
+                _release_domain_reservation(item)
                 # 出口的成败由**整条链**的结果决定（而不是只看注册那一段）。
                 slot_pool.release(
                     item.proxy,

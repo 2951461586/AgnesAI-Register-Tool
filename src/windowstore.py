@@ -153,6 +153,40 @@ def record(key: str, ts: float | None = None) -> None:
     _maybe_compact()
 
 
+def drop(key: str, n: int = 1) -> None:
+    """丢掉 `key` 上**最新**的 `n` 条事件（预留没用上时归还）。
+
+    🔴 为什么需要它：域名维度的预留是按"**一个账号要打两枪**"占的
+      （见 `pipeline.provision` —— 发码 + 注册共用同一张域名计数，而注册时
+      域名已定死、换不了）。账号中途失败时那两格里可能有一格没用上，
+      不还回去就会一直占着 —— 而一个域名一小时只有 2 格，泄漏几次就把整个
+      域名锁死，现象是"什么都没干却被限流"。
+
+    ⚠ 与 `record` 不同，这是**读-改-写**（要删行，追加做不到），所以在并发下
+      是**尽力而为**：两个进程同时 drop 可能多丢一条。方向是**更松**，可接受；
+      且它只在"账号失败 / 换域名"这条非热路径上被调用。
+
+    ⚠ 时间戳可能相同（同一瞬间连占两格）⇒ 排序键带上原文件下标，
+      保证"后写进去的"被当成更新的。
+    """
+    n = int(n)
+    if n <= 0:
+        return
+    entries = _read_entries()
+    mine = [i for i, e in enumerate(entries) if e.get("key") == key]
+    if not mine:
+        return
+    newest = sorted(mine, key=lambda i: (_as_ts(entries[i].get("ts")), i))[-n:]
+    drop_idx = set(newest)
+    keep = [e for i, e in enumerate(entries) if i not in drop_idx]
+    text = "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in keep)
+    try:
+        fsutil.atomic_write_text(state_path(), text)
+    except OSError as ex:
+        # 不抛：归还失败只是"那一格多占一会儿"，而它自愈（窗口滑出）。
+        print(f"  ⚠ 窗口预留归还失败（{type(ex).__name__}: {ex}）—— 那一格会一直占着")
+
+
 def _maybe_compact() -> None:
     """行数远多于窗口所需时，重写文件只留窗口内的条目。
 

@@ -11,6 +11,8 @@
   用例后 `acquire()` 会抱着默认的 1 小时窗口睡死，本文件整跑必挂。
 """
 
+import contextlib
+import threading
 import time
 from typing import cast
 
@@ -21,7 +23,9 @@ from src.proxypool import SlotPool
 
 
 class FakeMail:
-    def __init__(self, code="123456", create=None):
+    # ⚠ `code` 必须允许 `None` —— 那对应真实契约里 `wait_for_code()` 返回
+    #   `str | None`（"等不到码"是一个真实状态，不是测试造出来的边界）。
+    def __init__(self, code: str | None = "123456", create=None):
         self.code = code
         self._create = create
         self.last_error = ""
@@ -412,6 +416,192 @@ def test_domain_window_also_persists_across_processes(monkeypatch):
 
     assert P.domain_limiter("a.com").wait_time() > 3000
     assert P.domain_limiter("b.com").wait_time() == 0.0
+
+
+def test_acquire_many_is_atomic_and_refuses_partial():
+    """🔴 守卫：`acquire_many` 要么拿到 n 格、要么一格不占（**原子**）。
+
+    占一半是最坏的：调用方会以为占成功了，而实际只够发一枪。
+    """
+    win = P.SlidingWindow(max_events=2, window_s=3600.0)
+    win.acquire_many(2)
+    assert win.room() == 0
+    with pytest.raises(P.WindowBusy):
+        win.acquire_many(2, max_wait=0.0)
+    assert win.room() == 0  # 没被占掉半格
+
+    win.release(1)
+    assert win.room() == 1
+    win.release(99)  # 多还要安全（不抛、不倒扣）
+    assert win.room() == 2
+
+
+def test_acquire_many_rejects_impossible_n():
+    """上限本身就装不下 n 格 = 配置矛盾，等多久都没用 ⇒ 立刻抛，别睡。"""
+    win = P.SlidingWindow(max_events=1, window_s=60.0)
+    with pytest.raises(P.WindowBusy) as ei:
+        win.acquire_many(2, max_wait=0.0)
+    assert "配置矛盾" in str(ei.value)
+    assert win.room() == 1  # 一格没动
+
+
+def test_domain_window_reserves_both_shots_so_codes_are_not_burned(monkeypatch):
+    """契约：域名窗口装不下「发码 + 注册」两枪时，**一枪都不发**。
+
+    实测（2026-10-14，5 账号跑批）：3/5 是 `code='ok(5 polls)'` +
+    `register='failed' [quota_guard]` —— 码烧了、账号拿不到。根因是 `provision`
+    只预留 1 格就发码，而一个账号要打**两枪**（发码 + 注册共用同一张域名计数，
+    见 docs/protocol.md §3），且注册时域名已定死在邮箱里、**换不了**。
+
+    ⚠ 本用例是**顺序**跑的（`_run` 固定 `producers=1`），而真正的缺陷是
+      **竞态** ⇒ 它在修前也会过。真正的回归用例是下面那条
+      `test_concurrent_producers_cannot_burn_codes`。这条锁的是**契约**：
+      "预留不够就一枪不发"，以及"一个成功账号恰好占 2 格"（不漏不多）。
+    """
+    monkeypatch.setattr(P.config, "mail_domains", lambda: ["only.com"])
+    monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 2)  # = 1 个账号
+    monkeypatch.setattr(P.config, "DOMAIN_WINDOW_S", 3600.0)
+
+    # 第 1 个账号：预留 2 格 → 发码 → 注册 → 成功（域名正好占满）
+    first = FakeClient()
+    r1 = _run(monkeypatch, client=first)[0]
+    assert r1.status == "success", r1.error
+    assert first.calls == ["send_code", "register", "login", "create_key"]
+    assert P.domain_limiter("only.com").room() == 0  # 恰好 2 枪，不多不少
+
+    # 第 2 个账号：一格都没有，也没别的域名可换
+    #   ⇒ 必须 `skipped`（**一个请求都没发**），绝不能是"发了码才失败"
+    second = FakeClient()
+    r2 = _run(monkeypatch, client=second)[0]
+    assert r2.status == "skipped", (r2.status, r2.error)
+    assert P.error_kind_of(r2) == P.ERR_QUOTA_GUARD
+    assert second.calls == []  # 🔴 send_code 一次都没调 = 没烧码
+    assert r2.stages["mailbox"] == "skipped"
+    assert "避免烧码" in r2.error
+
+
+def test_domain_reservation_is_released_when_account_dies(monkeypatch):
+    """🔴 守卫：账号在发码之后死掉时，**没用上的那一格必须还回去**。
+
+    不还的后果：一个域名一小时只有 2 格，每失败一个账号就白占一格
+    ⇒ 跑几个失败账号就把域名锁死，现象是"什么都没干却被限流"。
+    """
+    monkeypatch.setattr(P.config, "mail_domains", lambda: ["only.com"])
+    monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 4)
+    monkeypatch.setattr(P.config, "DOMAIN_WINDOW_S", 3600.0)
+
+    # 发码成功、但等不到码 ⇒ 死在 rejected（注册那一枪永远不会发生）
+    r1 = _run(monkeypatch, mail=FakeMail(code=None))[0]
+    assert r1.status == "failed"
+    assert P.error_kind_of(r1) == P.ERR_REJECTED
+
+    # 预留 2 格 → 发码用掉 1 格 → 死掉时归还剩下的 1 格。
+    # ⚠ 剩下的**那一格发码是真的发出去了**（服务端记了账），所以不该还 ——
+    #   4 - 1 = 3 才是诚实值，还成 4 就比服务端松了。
+    assert P.domain_limiter("only.com").room() == 3
+
+
+def test_batch_does_not_burn_codes_when_domains_run_out(monkeypatch):
+    """契约：3 个域名 × 2 格（= 各 1 个账号），跑 4 个 ⇒ 3 成功 + 1 跳过。
+
+    修前：4 个生产者各自发码 ⇒ 域名窗口全被打满 ⇒ **所有** register 进不去
+          ⇒ 码全烧了、账号一个都拿不到（实测 3/5）。
+    修后：3 个账号各占满一个域名（两枪都装得下）⇒ 成功；
+          第 4 个**一枪不发** ⇒ `skipped`（而不是"烧了码才失败"）。
+
+    ⚠ 同样地，`producers=1` 是顺序跑，所以这条在修前也会过 —— 它锁的是
+      "**不变量**：没有任何账号是'发了码却没成功'"以及"每域名恰好 2 枪"。
+    """
+    monkeypatch.setattr(P.config, "mail_domains", lambda: ["a.com", "b.com", "c.com"])
+    monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 2)
+    monkeypatch.setattr(P.config, "DOMAIN_WINDOW_S", 3600.0)
+
+    results = _run(monkeypatch, count=4)  # `_run` 固定 producers=1 ⇒ 顺序可预期
+    by = {}
+    for r in results:
+        by[r.status] = by.get(r.status, 0) + 1
+
+    assert by.get("success") == 3, [(r.status, r.error[:60]) for r in results]
+    assert by.get("skipped") == 1, [(r.status, r.error[:60]) for r in results]
+    # 🔴 关键：没有任何一条是"码发了才失败"
+    for r in results:
+        assert not (r.stages["code"].startswith("ok") and r.status != "success"), (
+            r.status,
+            r.stages["code"],
+            r.error[:80],
+        )
+    # 三个域名各恰好 2 枪（不多不少 ⇒ 预留没漏也没多占）
+    for d in ("a.com", "b.com", "c.com"):
+        assert P.domain_limiter(d).room() == 0, d
+
+
+def test_concurrent_producers_cannot_burn_codes(monkeypatch):
+    """🔴 守卫（**真正的回归**）：并发生产者不能"都发了码、却都注册不进去"。
+
+    实测（2026-10-14，5 账号跑批）：3/5 是 `code='ok(...)'` +
+    `register='failed' [quota_guard]`。根因是 `provision` 的"看窗口还有没有位置"
+    与"占位置"**不是原子的**：两路生产者可以**同时**看到还有位置，然后一起
+    发码 —— 而域名窗口只有 2 格，注册那一枪就没地方了。
+
+    这里用一个 barrier 把两路生产者**钉在**"预留完成、发码之前"那一点，
+    把竞态变成确定性的（不靠碰运气复现）：
+
+        修前：两条都是 `failed`（码烧了）—— 上面那条不变量被破坏
+        修后：一条成功、另一条 `skipped`（**一枪都没发**）
+    """
+    monkeypatch.setattr(P.config, "mail_domains", lambda: ["only.com"])
+    monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 2)  # 只够 1 个账号
+    monkeypatch.setattr(P.config, "DOMAIN_WINDOW_S", 3600.0)
+    monkeypatch.setattr(P.config, "REGISTER_MAX_PER_WINDOW", 100)  # 隔离出域名维度
+    monkeypatch.setattr(P.config, "REGISTER_WINDOW_S", 1.0)
+    monkeypatch.setattr(P.config, "REGISTER_RETRIES", 0)
+    _patch_verify(monkeypatch)
+
+    # 只够 1 个账号 ⇒ 两路都到齐是不可能的（另一路会被闸门拦下）。
+    # ⚠ 超时短一点：修后本来就只有一路能走到这里。
+    barrier = threading.Barrier(2, timeout=2)
+
+    class BarrierMail(FakeMail):
+        def create_mailbox(self, domain=None, count=1):
+            # 两路都到齐才放行。另一路被闸门拦下时这里会超时 —— 那正是"修后"的
+            # 正常情况，所以用 `suppress` 明确表达"这个异常是预期的"，
+            # 而不是写一个空 `except`（那看起来像漏了处理）。
+            with contextlib.suppress(threading.BrokenBarrierError):
+                barrier.wait()
+            return super().create_mailbox(domain, count)
+
+    clients = [FakeClient(), FakeClient()]
+    handed: list = []
+
+    def factory(proxy=None):
+        # 生产者与消费者都会调它；按调用顺序发，保证每个线程拿到稳定实例
+        c = clients[len(handed) % 2]
+        handed.append(c)
+        return c
+
+    results = P.run_batch(
+        count=2,
+        producers=2,
+        workers=1,
+        verbose=False,
+        mail_factory=lambda: BarrierMail(),
+        client_factory=factory,
+        slot_pool=SlotPool([]),
+    )
+
+    by = {}
+    for r in results:
+        by[r.status] = by.get(r.status, 0) + 1
+    assert by.get("success") == 1, [(r.status, r.error[:80]) for r in results]
+    assert by.get("skipped") == 1, [(r.status, r.error[:80]) for r in results]
+    # 🔴 不变量：没有任何账号是"发了码却没成功"（= 烧码）
+    for r in results:
+        assert not (r.stages["code"].startswith("ok") and r.status != "success"), (
+            "有账号发了码却没注册成功（码被烧掉了）",
+            r.status,
+            r.stages["code"],
+            r.error[:80],
+        )
 
 
 def test_slot_key_never_contains_credentials():

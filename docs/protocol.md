@@ -154,6 +154,24 @@ POST https://apihub.agnes-ai.com/v1/chat/completions {"model":"agnes-2.5-flash",
 - **两个端点共用同一张计数**：`/api/verification` 与 `/api/user/register`
    在被限流时返回**同一条消息**。
 
+  🔴 **推论（很重要，曾被读错）：窗口计的是「请求」，而一个账号要打两枪**
+  ⇒ `AR_*_MAX_PER_WINDOW=2` 的真实含义是 **1 个账号/窗口**，不是 2 个。
+  想跑 N 个账号，两个维度的上限都要 ≥ `2N`。
+
+- **域名维度在注册时换不动** —— 域名已经写死在邮箱地址里。所以本地闸门
+  （`src/pipeline.py`）必须**一次占够 `REQUESTS_PER_ACCOUNT` 格才发码**：
+  "只留 1 格就发码"= 码烧了、注册进不去。
+
+  ⚠ 实测（2026-10-14，5 账号跑批）：**3/5** 是这个形态 ——
+  3 条记录 `code='ok(...)'`（轮询 5 / 3 / 5 次）+ `register='failed' [quota_guard]`，
+  而 `own.example` 与 `sub.own.example` **各 2/2 打满**。
+
+  🔴 根因不是"阈值太小"，而是**竞态**：`provision` 的"看窗口还有没有位置"
+  与"占位置"不是原子的 ⇒ 两路生产者可以**同时**看到还有位置、然后一起发码。
+  修后不变量：**一个账号要么两枪都能发，要么一枪不发**（`skipped`）。
+  回归用例：`tests/test_pipeline.py::test_concurrent_producers_cannot_burn_codes`
+  （用 barrier 把竞态钉成确定性的；在修前它报 `{'failed': 2}`）。
+
 - **`login` 不受影响**：连打 6 次错误密码 → 全是 `401`，没有 429。
 
 - **请求体校验先于限流检查**：密码 < 8、两次密码不一致、`code` < 4 位会返回
