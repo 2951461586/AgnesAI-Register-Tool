@@ -27,32 +27,38 @@ Agnes 实测有一层**按 IP 的注册尝试限流**：`/api/verification` 与
 "一天内不会无限打"。等测准服务端窗口，再按实测改这里的默认值。
 """
 
-import json
 import math
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from common import config
 
-from . import fsutil
+from . import jsonlstore
 
 
 class QuotaExceeded(RuntimeError):
     """本地闸门拦下了这一批。**一个请求都没发**。"""
 
 
-def state_path() -> Path:
-    """计数文件。`AR_QUOTA_STATE` 可覆盖（自检脚本靠它做隔离）。
+# 环境变量覆盖名。测试靠它把状态钉在 tmp 目录 ——
+# 🔴 不隔离的后果很具体：跑一次测试就往**真实** `state/` 写记录，而那个文件会
+#    影响**下一次真实跑批**的闸门（实测踩过：测试把额度吃掉）。
+STATE_ENV = "AR_QUOTA_STATE"
 
-    ⚠ 在**调用时**读环境变量，不受导入顺序影响 —— 与 `config` 的常量不同，
-      这样测试可以在 import 之后改环境变量而不必重载模块。
-    """
-    override = (os.getenv("AR_QUOTA_STATE") or "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path(__file__).resolve().parents[1] / "state" / "register_quota.jsonl"
+_STORE = jsonlstore.JsonlStore(
+    STATE_ENV,
+    Path(__file__).resolve().parents[1] / "state" / "register_quota.jsonl",
+    label="配额计数",
+)
+
+# `_as_ts` 保留为模块级别名（宽容取时间戳，见 `jsonlstore.as_ts`）。
+_as_ts = jsonlstore.as_ts
+
+
+def state_path() -> Path:
+    """计数文件。`AR_QUOTA_STATE` 可覆盖（自检脚本靠它做隔离）。"""
+    return _STORE.path()
 
 
 @dataclass
@@ -95,53 +101,11 @@ class QuotaStatus:
         )
 
 
-def _as_ts(raw) -> float:
-    """宽容地取时间戳。**坏值退回 0**，不抛。
-
-    ⚠ 这个文件是**本地**的，可能被人手改过（比如手工塞一行进去看闸门行为）。
-      一个 `"ts": "yesterday"` 不该让整批任务炸在 `float()` 上 ——
-      退回 0 的后果只是这条记录被当成窗口外，是安全方向的降级。
-    """
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _read_entries() -> list[dict]:
-    """读计数文件 → 条目列表。**读不到就返回空**，不抛。
-
-    🔴 静默降级是有意的，但代价必须说清楚：文件读不出来 ⇒ `used=0` ⇒
-      闸门放行。这就是"状态文件是加速器不是数据"的那条约定（见 fsutil）。
-      真正的高危失败在**台账**那一侧，那边是让它抛的。
-    """
-    p = state_path()
-    if not p.is_file():
-        return []
-    out: list[dict] = []
-    try:
-        text = p.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            d = json.loads(line)
-        except ValueError:
-            # 半截行（写盘时被杀）只丢这一行，不丢整个文件。
-            continue
-        if isinstance(d, dict):
-            out.append(d)
-    return out
-
-
 def status(now: float | None = None) -> QuotaStatus:
     """窗口内的计数。`now` 只为测试可注入，生产不该传。"""
     now = time.time() if now is None else now
     cutoff = now - config.REG_QUOTA_WINDOW_H * 3600
-    entries = [e for e in _read_entries() if _as_ts(e.get("ts")) >= cutoff]
+    entries = [e for e in _STORE.read() if _as_ts(e.get("ts")) >= cutoff]
     used = [e for e in entries if e.get("ok")]
     oldest = min((_as_ts(e.get("ts")) for e in used), default=0.0)
     return QuotaStatus(
@@ -177,24 +141,16 @@ def record(email: str, *, ok: bool, ts: float | None = None, note: str = "") -> 
     ⚠ 与台账相反：计数文件丢了只影响下一轮的保守程度，不该让整批任务失败
       （`proxypool` / `quota` 是同一策略，`ledger` 是另一策略）。
     """
-    p = state_path()
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(
-            {
-                "ts": round(time.time() if ts is None else ts, 3),
-                "email": email,
-                "ok": bool(ok),
-                "note": note[:120],
-            },
-            ensure_ascii=False,
-        )
-        with p.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except OSError as ex:
-        print(f"  ⚠ 配额计数写不进去（{type(ex).__name__}: {ex}）—— 本次不记账，闸门会偏松")
-        return
-    _maybe_compact()
+    ok_written = _STORE.append(
+        {
+            "ts": round(time.time() if ts is None else ts, 3),
+            "email": email,
+            "ok": bool(ok),
+            "note": note[:120],
+        }
+    )
+    if ok_written:
+        _maybe_compact()
 
 
 def _maybe_compact() -> None:
@@ -203,16 +159,12 @@ def _maybe_compact() -> None:
     🔴 只在**行数 > 4×上限**时才压缩：每次成功都重写一遍文件会让
       "写"变成 O(n) 并且放大"写到一半被杀"的窗口。
     """
-    entries = _read_entries()
+    entries = _STORE.read()
     if len(entries) <= max(200, config.REG_QUOTA_MAX * 4):
         return
     cutoff = time.time() - config.REG_QUOTA_WINDOW_H * 3600
     keep = [e for e in entries if _as_ts(e.get("ts")) >= cutoff]
-    text = "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in keep)
-    try:
-        fsutil.atomic_write_text(state_path(), text)
-    except OSError as ex:
-        print(f"  ⚠ 配额计数压缩失败（{type(ex).__name__}: {ex}）—— 保持原文件")
+    _STORE.rewrite(keep)
 
 
 def shortfall_hint(left: int, count: int, ignore: bool) -> str:
