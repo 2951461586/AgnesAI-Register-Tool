@@ -10,7 +10,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 dependencies = [
-    "requests>=2.31",
+    # 🔴 `[socks]` extra 是**必需的** —— 槽位池 / `AR_PROXY` 支持 `socks5h://`，
+    #    而 requests 走 SOCKS 需要 PySocks。只写 `requests` 的话，本机可能因为
+    #    别的原因恰好装着而跑得通，但**换台机器就 `InvalidSchema`**（部署时才炸）。
+    #    与 requirements.txt 保持一致。
+    "requests[socks]>=2.31",
 ]
 
 # 开发依赖与运行依赖分开 —— CI 的 secret-scan job 只装运行依赖（甚至不装）。

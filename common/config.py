@@ -238,6 +238,22 @@ REG_QUOTA_WINDOW_H = _env_float("AR_REG_QUOTA_WINDOW_H", 24)
 # 格式（与常见代理商控制台一致）：
 #     AR_PROXY=host:port:user:pass          # 单条
 #     AR_PROXY=http://user:pass@host:port   # 也接受完整 URL
+#     AR_PROXY=socks5h://user:pass@host:port # SOCKS5（见下面的 🔴）
+#
+# 🔴 **SOCKS5 必须写 `socks5h://`，不能写 `socks5://`** —— 否则会**静默失败**：
+#
+#     `socks5://`   → DNS **在本地**解析，把解析结果发给代理
+#     `socks5h://`  → DNS **在代理侧**解析（h = hostname）
+#
+#     本机实测（2026-10-14）：开着 Clash TUN 时，代理域名 `<proxy-gateway>`
+#     被本地 DNS 解析成 **`198.18.1.166`**（Clash 的 fake-IP 段），于是
+#     `socks5://` 把那个**假 IP** 发给代理 ⇒ `0x04 Host unreachable`；
+#     换 `socks5h://` 立刻通。
+#     ⚠ 同一现象还有第二个面具：裸 TCP 连代理端口只要 **0.03s** —— 那是连到了
+#       Clash 的本地虚拟网卡。**"TCP 能连" ≠ "代理可用"**（与 `probe_slots`
+#       的 docstring 里那条是同一个坑）。
+#
+# 🔴 SOCKS 需要 `requests[socks]`（PySocks），见 requirements.txt。
 AR_PROXY = os.getenv("AR_PROXY", "").strip()
 # 收信轮询是否也走代理（默认否）。轮询是整链瓶颈，绕代理只会更慢；
 # 而 Cloudflare Worker 不关心我们的出口 IP，走代理没有任何收益。

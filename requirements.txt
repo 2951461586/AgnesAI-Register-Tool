@@ -1,1 +1,6 @@
-requests>=2.31
+# 🔴 `[socks]` 这个 extra 是**必需的**：槽位池/`AR_PROXY` 支持 `socks5h://`
+#    （见 common/config.py 的出口代理注释），而 `requests` 走 SOCKS 需要 PySocks。
+#    只写 `requests` 的话本机可能因为别的原因恰好装着 PySocks 而跑得通，
+#    但**换台机器就 `InvalidSchema: Missing dependencies for SOCKS support`** ——
+#    部署时才炸，而且炸在第一个请求上。
+requests[socks]>=2.31
