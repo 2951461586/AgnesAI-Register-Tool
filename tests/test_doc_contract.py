@@ -224,7 +224,7 @@ def test_exit_code_table_matches_run_py_docstring():
     """
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     run_py = (ROOT / "run.py").read_text(encoding="utf-8")
-    for code in range(6):
+    for code in range(7):
         assert re.search(rf"\| {code} \|", readme), f"README 的退出码表缺 {code}"
         assert re.search(rf"^  {code} =", run_py, re.M), f"run.py 的 docstring 缺退出码 {code}"
 

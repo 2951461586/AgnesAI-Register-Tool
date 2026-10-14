@@ -43,6 +43,7 @@
   3 = 台账护栏触发（读源损坏 / 防静默缩水，拒绝写盘，避免丢账号）
   4 = 配置有问题（缺凭据 / 值不合法，如窗口上限装不下一个账号）
   5 = 内部错误（记录序列化失败）
+  6 = 链路预检不通过（`--preflight`；**未发出任何注册请求**）
 """
 
 import argparse
@@ -56,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import config  # noqa: E402
 from src import cli as _cli  # noqa: E402
 from src import ledger as _ledger  # noqa: E402
+from src import preflight as _preflight  # noqa: E402
 from src import quota as _quota  # noqa: E402
 from src import redact  # noqa: E402
 from src import report as _report  # noqa: E402
@@ -104,6 +106,12 @@ def main(argv=None):
         "--ignore-quota",
         action="store_true",
         help="跳过本地配额保护（仅当确信服务端没在拦时用）",
+    )
+    ap.add_argument(
+        "--preflight",
+        action="store_true",
+        help="跑批前先体检出口链路（只读请求，不消耗注册窗口）。"
+        "失败率过高就**中止**（退出码 6）—— 避免把注册窗口白烧在链路坏时段上。",
     )
     args = ap.parse_args(argv)
 
@@ -196,6 +204,26 @@ def main(argv=None):
             "批量会被窗口卡住。",
             flush=True,
         )
+
+    # ── 链路健康预检（`--preflight`）──────────────────────────────
+    # 🔴 为什么值得单独一步：注册窗口是本工具**最贵且不可再生**的资源
+    #    （撞上就是 1 小时）。本会话**手工**体检过 3 次，其中一次正好避开
+    #    全池 58% 失败的坏时段 —— 那一次省下 4 个域名窗口。
+    # ⚠ 预检本身只打**只读**请求（无鉴权 ⇒ 401），**不消耗注册窗口**。
+    # ⚠ 判据不是"失败率高低"，而是"**多数出口一起坏**吗" —— 个别坏槽位不该
+    #    拦住整批（撞到它换出口就行了）。见 `src/preflight.py` 的 docstring。
+    if args.preflight:
+        pf = _preflight.run(slots or _preflight.enabled_slots())
+        print(pf.describe(), flush=True)
+        why = pf.verdict()
+        if why:
+            print(
+                f"✗ 链路预检不通过：{why}\n"
+                f"  已中止，**未发出任何注册请求**。\n"
+                f"  选项：① 换时间点再跑；② 去掉 --preflight 强行跑（会白烧窗口）。",
+                file=sys.stderr,
+            )
+            return 6
 
     t0 = time.time()
     results = run_batch(
