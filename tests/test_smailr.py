@@ -79,6 +79,24 @@ def client_with(routes, **kw):
     return c, fake
 
 
+@pytest.fixture(autouse=True)
+def _pin_domain_ids(monkeypatch):
+    """把域名配置钉在**测试本地**，不读宿主的 `.env`。
+
+    🔴 与 `conftest.py` 里那次修复同一类缺陷：用例读真实配置 ⇒ 它在 CI 上
+      的行为取决于环境，而且**改一次 `.env` 就会让一批用例变红/变绿**。
+      实测：2026-10-14 把真 `domain_id` 写进 `.env` 之后，
+      `test_create_mailbox_omits_domain_id_for_the_default_domain` 就挂了。
+
+    ⚠ 默认给一个**空的** id 表（= 只有 `SMAILR_DEFAULT_DOMAIN` 那条兜底
+      路径），需要 id 的用例自己 `monkeypatch.setattr` 填。
+    """
+    from common import config
+
+    monkeypatch.setattr(config, "SMAILR_DOMAIN_IDS", {})
+    monkeypatch.setattr(config, "SMAILR_DEFAULT_DOMAIN", "smailr.com")
+
+
 def _mb(mid="mb1", email="agnesabc@smailr.com", **extra):
     return {"id": mid, "email": email, "mail_count": 0, **extra}
 
@@ -160,8 +178,33 @@ def test_create_mailbox_takes_the_address_from_the_response():
     assert fake.calls[0]["json"]["local_part"].startswith("agnes")
 
 
-def test_create_mailbox_omits_domain_id_for_the_default_domain():
-    """默认域名是**唯一可以省略** `domain_id` 的（API 不可枚举域名）。"""
+def test_create_mailbox_prefers_an_explicit_domain_id(monkeypatch):
+    """🔴 **显式配了 `domain_id` 就优先用它**，哪怕它是"默认域名"。
+
+    这条语义是被**浏览器 HAR 推翻后**改过来的（2026-10-14）：
+    `POST /api/v1/mailboxes` 的请求体里，4 个域名**全都带了** `domain_id`
+    （包括那个默认域名），而且全部 201。反过来说：账号的默认域名是个
+    **要等级 4** 的域名 ⇒ 省略 `domain_id` 会撞 403 —— 带上它的真 id
+    反而能建成。
+    ⇒ "能省略"只是**没配 id 时**的兜底，不该盖过显式配置。
+    """
+    from common import config
+
+    monkeypatch.setattr(config, "SMAILR_DEFAULT_DOMAIN", "smailr.com")
+    monkeypatch.setattr(config, "SMAILR_DOMAIN_IDS", {"smailr.com": "dom-default-uuid"})
+    c, fake = client_with(
+        [("POST", "/api/v1/mailboxes", FakeResponse(200, {"id": "1", "email": "a@smailr.com"}))]
+    )
+    c.create_mailbox("smailr.com", 1)
+    assert fake.calls[0]["json"]["domain_id"] == "dom-default-uuid"
+
+
+def test_create_mailbox_omits_domain_id_when_default_and_unconfigured(monkeypatch):
+    """没配 id 且它就是默认域名 ⇒ **省略**（API 不可枚举域名，只能靠账号设置）。"""
+    from common import config
+
+    monkeypatch.setattr(config, "SMAILR_DEFAULT_DOMAIN", "smailr.com")
+    monkeypatch.setattr(config, "SMAILR_DOMAIN_IDS", {})
     c, fake = client_with(
         [("POST", "/api/v1/mailboxes", FakeResponse(200, {"id": "1", "email": "a@smailr.com"}))]
     )

@@ -231,9 +231,15 @@ def provision(
         #    抛 `WindowBusy` ⇒ `classify` → `quota_guard` ⇒ 生产者按
         #    **`skipped`** 记账（且**不**计入配额尝试）—— 与语义一致。
         reservation.release()
+        # 🔴 消息里**带上两个维度的剩余等待时间**：原来说的是"IP / 域名窗口都满"，
+        #    读者无法判断"该等 5 分钟还是该换池子"。实测（2026-10-14）这条消息
+        #    出现过一次，而真相是"出口池里还有 3 个空槽位、只是选错了"——
+        #    数字能直接指向那种情况。
         raise WindowBusy(
             f"本地闸门把 {config.REGISTER_RETRIES + 1} 次尝试全部换掉了，"
-            f"一个验证码请求都没发出去（IP / 域名窗口都满）"
+            f"一个验证码请求都没发出去"
+            f"（出口窗口还要等 {register_limiter(ticket.proxy).wait_time():.0f}s，"
+            f"域名窗口还要等 {domain_limiter(domain).wait_time():.0f}s）"
         )
     rec.timings["code_send_ms"] = int((time.time() - t1) * 1000)
     if waited:

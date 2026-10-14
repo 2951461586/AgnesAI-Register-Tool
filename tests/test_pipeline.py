@@ -678,3 +678,69 @@ def test_window_state_is_isolated_from_real_state_dir():
         f"窗口状态落到了真实 state/：{p}\n"
         f"  `conftest.py::_isolate_state` 应该把 AR_WINDOW_STATE 钉在 tmp 目录里。"
     )
+
+
+# ── IP 维度的"挑有空位的出口"（2026-10-14 实测缺陷的回归）────────────
+def test_slot_has_room_follows_the_window(monkeypatch):
+    """`_slot_has_room` 必须看**落盘**的窗口状态，而不是进程内计数。
+
+    🔴 它是"跨进程记忆"的桥：`SlotPool.used` 每次启动即清零，而窗口
+      （`windowstore`）是持久的 —— 没有这座桥，池子就不知道上一批
+      把哪些出口打满了。
+    """
+    from src.pipeline import limiter as L
+
+    monkeypatch.setattr(L.config, "REGISTER_MAX_PER_WINDOW", 1)
+    monkeypatch.setattr(L.config, "REGISTER_WINDOW_S", 3600.0)
+    monkeypatch.setattr(L.config, "LIMITER_MAX_WAIT_S", 20.0)
+
+    assert L._slot_has_room("slot-x") is True
+    L.register_limiter("slot-x").acquire(0)  # 打满（还要等 ~3600s）
+    assert L._slot_has_room("slot-x") is False
+
+    # 另一个出口不受影响（窗口是**按出口分桶**的）
+    assert L._slot_has_room("slot-y") is True
+
+
+def test_slot_has_room_treats_a_long_wait_as_unusable(monkeypatch):
+    """判据是 `LIMITER_MAX_WAIT_S`（与 `provision` 的重试循环同一个阈值）。
+
+    🔴 "还剩 1 格但要等 59 分钟"在本项目的语义里就是**不可用** ——
+      否则池子会把一个等不起的出口当成可用的推上来。
+    """
+    from src.pipeline import limiter as L
+
+    monkeypatch.setattr(L.config, "REGISTER_MAX_PER_WINDOW", 2)
+    monkeypatch.setattr(L.config, "REGISTER_WINDOW_S", 3600.0)
+
+    monkeypatch.setattr(L.config, "LIMITER_MAX_WAIT_S", 7200.0)  # 比窗口还长
+    L.register_limiter("s").acquire(0)
+    L.register_limiter("s").acquire(0)  # 打满，要等 ~3600s
+    assert L._slot_has_room("s") is True, "封顶比窗口长 ⇒ 等得起 ⇒ 算可用"
+
+    monkeypatch.setattr(L.config, "LIMITER_MAX_WAIT_S", 20.0)
+    assert L._slot_has_room("s") is False, "封顶 20s < 3600s ⇒ 等不起 ⇒ 不可用"
+
+
+def test_rotate_slot_moves_to_a_slot_with_room(monkeypatch):
+    """🔴 回归：`_rotate_slot` 的目的是换一张**新窗口**。
+
+    换到一个同样满的出口等于没换，还白烧一次尝试 —— 而每次尝试都消耗窗口。
+    旧实现只按"最少使用"挑（进程内计数，全为 0）⇒ 挑到列表里第一个，
+    也就是**原来那个**（或另一个同样满的），于是 `new == old` ⇒ 返回 False
+    ⇒ 调用方以为"换不动"，其实池子里有空的。
+    """
+    from types import SimpleNamespace
+
+    from src.pipeline import limiter as L
+
+    monkeypatch.setattr(L.config, "REGISTER_MAX_PER_WINDOW", 1)
+    monkeypatch.setattr(L.config, "REGISTER_WINDOW_S", 3600.0)
+    monkeypatch.setattr(L.config, "LIMITER_MAX_WAIT_S", 20.0)
+
+    pool = SlotPool(["full", "free"])
+    holder = SimpleNamespace(proxy="full")
+    L.register_limiter("full").acquire(0)  # 只有 full 被打满
+
+    assert L._rotate_slot(pool, holder, error="test") is True
+    assert holder.proxy == "free", f"应换到有空位的出口，实际 {holder.proxy!r}"

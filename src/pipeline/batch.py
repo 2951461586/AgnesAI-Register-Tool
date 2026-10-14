@@ -34,7 +34,7 @@ from ..agnes import (
 )
 from ..proxypool import SlotPool, SlotPoolEmpty
 from .finish import finish, verify_keys
-from .limiter import WindowBusy
+from .limiter import WindowBusy, _slot_has_room
 from .provision import provision
 from .record import STAGES, AccountRecord, Ticket, _print, classify
 
@@ -128,7 +128,9 @@ def run_batch(
         # ② 借一个出口。**在闸门之后、第一个请求之前** —— 被本地闸门拦下的
         #    任务不该占着出口，也不该把出口的使用次数记上一笔。
         try:
-            slot = slot_pool.acquire()
+            # 🔴 带 `prefer=_slot_has_room`：池子的"最少使用"是**进程内**计数，
+            #    新进程里全是 0 ⇒ 不传它就会按列表顺序借到上一批刚打满的出口。
+            slot = slot_pool.acquire(prefer=_slot_has_room)
         except SlotPoolEmpty as ex:
             rec.fail(ERR_NETWORK, f"代理槽位池：{ex}", stage="mailbox")
             record_out(rec)

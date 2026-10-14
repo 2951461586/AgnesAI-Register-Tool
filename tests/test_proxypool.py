@@ -5,7 +5,35 @@
    代理凭据。
 """
 
-from src.proxypool import SlotStats
+from src.proxypool import SlotPool, SlotStats
+
+
+def test_acquire_prefers_the_slot_the_caller_calls_usable():
+    """🔴 回归（实测 2026-10-14）：`used` 是**进程内**计数 ⇒ 新进程里全是 0
+    ⇒ 排序退化成**列表顺序** ⇒ 先借到上一批刚把窗口打满的那几个。
+
+    现象：一批 7 个跑完后立刻再跑，4 次尝试全撞在满窗口上，以 `quota_guard`
+    收场 —— 而池子里其实还有 3 个出口是空的。
+    """
+    pool = SlotPool(["full-1", "full-2", "full-3", "free-1", "free-2"])
+    got = pool.acquire(prefer=lambda u: u.startswith("free"))
+    assert got == "free-1", f"应优先挑可用的，实际借到 {got!r}"
+
+
+def test_acquire_prefer_still_hands_out_a_slot_when_none_is_usable():
+    """全不可用时**仍然借得出** —— 不能变成死锁/抛异常。
+
+    "没得换"是调用方（`provision` 的重试循环）要判的事，池子不该替它决定。
+    """
+    pool = SlotPool(["a", "b"])
+    assert pool.acquire(prefer=lambda u: False) == "a"
+
+
+def test_acquire_without_prefer_keeps_least_used_order():
+    """默认行为不变：最少使用优先（`used` 相同时按列表顺序）。"""
+    pool = SlotPool(["a", "b"])
+    assert pool.acquire() == "a"
+    assert pool.acquire() == "b"
 
 
 def test_label_uses_port_for_url_form():
