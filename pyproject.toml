@@ -17,12 +17,13 @@ dependencies = [
     "requests[socks]>=2.31",
 ]
 
-# 开发依赖与运行依赖分开 —— 运行依赖只有 requests（本地与将来的 CI 都一样）。
-#
-# ⚠ 本仓库目前**没有** CI 配置（没有 `.github/workflows/`）⇒ "密钥不会被提交"
-#    目前**只靠本地手动检查** + `.gitignore`，没有任何自动闸门。
-#    🔴 这一条有守卫用例钉住：一旦这里有 CI 的措辞而仓库里没有对应配置，
-#      `tests/test_doc_contract.py::test_ci_claim_implies_ci_config_exists` 会红。
+# 开发依赖与运行依赖分开 —— 运行依赖只有 requests。
+# CI（`.github/workflows/ci.yml`）只装运行依赖 + dev 组。
+# 🔴 用例是**离线**的（零网络）⇒ CI 里**不需要任何凭据**（没有 AR_WORKER_* /
+#    `.env` 也全绿）。这一点由 `tests/conftest.py` 的夹具保证。
+# 🔴 这条声称有守卫用例钉住：`tests/test_doc_contract.py` 里的
+#    `test_ci_claim_implies_ci_config_exists` —— 说了有 CI 就必须真有。
+#    （之前这里写过"CI 的 secret-scan job"，而仓库里什么配置都没有。）
 #
 # 🔴 ruff 锁到次版本：它会随次版本**新增规则**，不锁的话某天会因为
 #    "上游发新版"而红，跟当次改动毫无关系（且这种红很容易被当成噪声忽略）。

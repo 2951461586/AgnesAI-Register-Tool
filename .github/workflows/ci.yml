@@ -1,0 +1,87 @@
+name: CI
+
+# 🔴 这个文件的存在本身有守卫用例钉住：
+#    `tests/test_doc_contract.py::test_ci_claim_implies_ci_config_exists`
+#    —— 一旦文档里声称"CI 会做 X"而这里没有工作流，用例会红。
+#    （之前 pyproject 就声称过"CI 的 secret-scan job"，而仓库里什么都没有。）
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# 🔴 最小权限：CI 只需要读代码。这个仓库里全是明文凭据（台账/JWT/sk- key/
+#    代理账密），所以"CI 被攻破能做什么"要压到最小。
+permissions:
+  contents: read
+
+# 同一分支的新 push 取消旧的运行 —— 省额度，也让红灯更快出现。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 离线用例 + lint ────────────────────────────────────────────
+  test:
+    name: pytest + ruff (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `pyproject.toml` 声明 requires-python >= 3.11，所以测两端。
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          # 只装运行依赖 + dev 组。
+          # 🔴 用例是**离线**的（零网络），所以这里**不需要任何凭据** ——
+          #    没有 AR_WORKER_* / .env 也照样全绿。
+          #    这一点由 `tests/conftest.py` 的夹具保证（它把宿主的域名池/
+          #    槽位池/状态文件全部替换成确定值）。曾经不成立：清掉 AR_WORKER_*
+          #    后 success 路径会以"没有可用的收信域名"失败。
+          pip install -r requirements.txt
+          pip install "pytest>=8" "ruff>=0.16,<0.17"
+
+      - name: ruff（lint）
+        run: python -m ruff check .
+
+      - name: ruff（format 检查）
+        run: python -m ruff format --check .
+
+      - name: 离线用例（零网络）
+        run: python -m pytest -q
+
+  # ── 密钥扫描 ───────────────────────────────────────────────────
+  # 为什么单独一个 job：本仓库是**公开**的，而它整条链路都在处理明文凭据
+  # （`.env` 的 Worker token、`ledger/` 的邮箱+密码+JWT+`sk-` key、`.slots.txt`
+  # 的代理账密）。这些文件都在 `.gitignore` 里，但"配了忽略"挡不住
+  # `git add -f`、也挡不住别人改了 `.gitignore`。
+  #
+  # ⚠ 本地也有一条同样的检查：`tests/test_doc_contract.py` 里的
+  #   `test_no_secret_shapes_in_shipped_files`（零依赖、离线跑）。
+  #   这个 job 覆盖面更广（全历史 + 更全的规则集），两者互补。
+  secret-scan:
+    name: secret-scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 🔴 必须全历史：只扫最后一次提交会漏掉"以前提交过、后来删掉"的凭据
+          #    —— 而那种凭据在 git 历史里**永远存在**。
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # ⚠ gitleaks-action 对**组织**账号需要 GITLEAKS_LICENSE（个人账号免费）。
+          #    如果这个 job 因为 license 报错，两个选择：
+          #      ① 配一个 GITLEAKS_LICENSE secret；
+          #      ② 删掉这个 job —— 本地的 `test_no_secret_shapes_in_shipped_files`
+          #         仍在跑（覆盖面小一些，但零依赖、且每次 pytest 都跑）。

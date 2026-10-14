@@ -244,6 +244,74 @@ def _paragraphs(text: str):
         yield "\n".join(buf)
 
 
+def test_no_secret_shapes_in_shipped_files():
+    """🔴 守卫：**会被提交的文件**里不能出现凭据形状。
+
+    为什么需要它（本项目特别需要）：仓库是**公开**的，而整条链路都在处理明文
+    凭据 —— `.env` 的 Worker token、`ledger/` 的邮箱+密码+JWT+`sk-` key、
+    `.slots.txt` 的代理账密。它们都在 `.gitignore` 里，但"配了忽略"挡不住
+    `git add -f`，也挡不住有人顺手改了 `.gitignore`（P1 就是后者）。
+
+    与 CI 里 gitleaks 的分工：这个是**零依赖 + 离线 + 每次 pytest 都跑**，
+    覆盖面小但永远在；gitleaks 覆盖面大（全历史 + 更全规则集）但只在 CI 里。
+
+    ⚠ 判据只收**高置信度**的形状，并刻意放过两类东西：
+      · 文档里的占位符（`sk-XXXX…`、`host:port:user:pass`）；
+      · **RFC 2606 / RFC 6761 保留域名**（`.example` / `.test` / `.invalid` /
+        `localhost`）—— 它们**不可能**是真实凭据，而用例故意拿它们当样本
+        （如 `tests/test_redact.py` 需要一条**形状像**代理串的假串来验脱敏）。
+      宁可少报，也不要变成一条被 `# noqa` 掉的噪音。
+    """
+    # 保留给文档/测试的域名：出现在命中里就说明那是合成样本，不是真凭据。
+    reserved = (".example", ".test", ".invalid", "localhost", "example.com", "example.org")
+    shapes = {
+        "私钥": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+        "JWT": re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"),
+        # 真实 sk- key 是 48 位左右的字母数字；文档里写的是 `sk-XXXX…` 这类
+        # 带省略号/尖括号的占位符，不会命中。
+        "sk- key": re.compile(r"\bsk-[A-Za-z0-9]{24,}\b"),
+        # `host:port:user:pass`（代理串的第二种形态）。
+        # 端口要求是 2~5 位数字，所以文档里的 `host:port:user:pass` 占位符不命中。
+        "代理账密串": re.compile(
+            r"\b[a-z0-9][a-z0-9.\-]{3,}:[0-9]{2,5}:[A-Za-z0-9_\-]{6,}:[A-Za-z0-9_\-]{6,}\b"
+        ),
+    }
+    files = [
+        ROOT / f
+        for f in (
+            "README.md",
+            ".env.example",
+            ".gitignore",
+            "pyproject.toml",
+            "requirements.txt",
+            "run.py",
+        )
+    ]
+    for pkg in ("src", "common", "tools", "tests", "docs"):
+        files += sorted((ROOT / pkg).rglob("*"))
+
+    hits = []
+    for p in files:
+        if not p.is_file() or p.suffix in (".pyc", ".gz"):
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for name, rx in shapes.items():
+            m = rx.search(text)
+            if m and not any(r in m.group(0) for r in reserved):
+                hits.append(f"{p.relative_to(ROOT).as_posix()}：命中「{name}」→ {m.group(0)[:40]}…")
+
+    assert not hits, (
+        "这些**会被提交**的文件里出现了凭据形状：\n  "
+        + "\n  ".join(hits)
+        + "\n  修法：把它移到 `.gitignore` 覆盖的目录（`ledger/` / `state/` / "
+        "`exports/` / `backups/`）或 `.env`，\n"
+        "  ⚠ 如果它已经进过 git 历史，仅仅删掉文件**不够** —— 历史里永远还在。"
+    )
+
+
 def test_no_bare_measured_window_value_outside_protocol():
     """实测的窗口下界只许出现在 `docs/protocol.md`。
 
