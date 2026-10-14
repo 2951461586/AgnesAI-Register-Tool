@@ -884,11 +884,19 @@ def provision(
         # ── 发验证码（写请求，两个维度的窗口都消耗）───────────────
         rec.enter("code")
         sent_at = now_ms()
+        # 🔴 这一枪**即将发出** ⇒ 先把预留扣掉，而且必须扣在**调用之前**。
+        #
+        #    "成功后扣"是不够的：网络层失败（`RemoteDisconnected` / `SSLEOFError`）
+        #    的请求**可能已经落地**，服务端可能已经记了这一枪。那种失败下不扣，
+        #    就等于把这一格也还回去 ⇒ 本地闸门比服务端**松** —— 而"宁可少打"
+        #    是本项目对本地闸门的一贯要求（见 config 里域名维度的注释）。
+        #
+        #    ⚠ 实测踩到：一次跑批 3 条 `send_code` 撞网络错误，域名窗口**各扣 0 格**
+        #      （预留 2 格被 `_release_domain_reservation` 全数还回）。
+        ticket.domain_reserved = max(0, ticket.domain_reserved - 1)
         try:
             ticket.client.send_code(rec.email)
         except AgnesQuota as ex:
-            # 服务端**记了这一枪**（它回了限流，不是没收到）⇒ 预留里用掉一格。
-            ticket.domain_reserved = max(0, ticket.domain_reserved - 1)
             if attempt >= config.REGISTER_RETRIES:
                 raise
             # 🔴 **先看是哪个维度**：域名维度换出口没用，IP 维度换域名没用。
@@ -913,8 +921,7 @@ def provision(
             log(f"发码被限流，退避 {back:.0f}s 后重试（{ex}）")
             time.sleep(back)
             continue
-        # 发码成功：预留里用掉一格（这一枪），剩下一格留给 `finish` 的首次注册。
-        ticket.domain_reserved = max(0, ticket.domain_reserved - 1)
+        # 发码成功：那一格已在**调用前**扣掉，剩下的留给 `finish` 的首次注册。
         break
     else:
         # 🔴 循环**没有 `break`** 就结束了 ⇒ **一次验证码都没发出去**：

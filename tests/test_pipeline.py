@@ -501,6 +501,35 @@ def test_domain_reservation_is_released_when_account_dies(monkeypatch):
     assert P.domain_limiter("only.com").room() == 3
 
 
+def test_send_code_network_failure_charges_exactly_one_grid(monkeypatch):
+    """🔴 守卫（回归）：`send_code` 撞**网络错误**时，域名窗口必须扣 **1** 格。
+
+    网络层失败（`RemoteDisconnected` / `SSLEOFError`）的请求**可能已经落地** ——
+    服务端可能已经记了这一枪。所以本地不能把它当成"没发生"：那样本地闸门
+    会比服务端**松**，而"宁可少打"是本地闸门的一贯要求。
+
+    实测踩到（2026-10-14 11:36 跑批）：3 条 `send_code` 撞网络错误，
+    域名窗口**各扣 0 格**（预留的 2 格被 `_release_domain_reservation` 全数还回）。
+    根因是预留只在**成功 / 限流**两条路上扣，网络失败那条没扣。
+    """
+    monkeypatch.setattr(P.config, "mail_domains", lambda: ["only.com"])
+    monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 2)
+    monkeypatch.setattr(P.config, "DOMAIN_WINDOW_S", 3600.0)
+
+    from src.agnes import AgnesNetwork
+
+    client = FakeClient(send_error=AgnesNetwork("RemoteDisconnected"))
+    r = _run(monkeypatch, client=client)[0]
+
+    assert r.status == "failed"
+    assert P.error_kind_of(r) == P.ERR_NETWORK
+    assert r.stages["mailbox"] == "ok"  # 邮箱建出来了
+    assert r.stages["code"] == "failed"  # 死在发码
+    # 🔴 恰好扣 1 格：0 = 太松（比服务端松），2 = 太紧（把注册那格也白占）
+    room = P.domain_limiter("only.com").room()
+    assert room == 1, f"应扣 1 格 ⇒ room=1；实际 room={room}"
+
+
 def test_batch_does_not_burn_codes_when_domains_run_out(monkeypatch):
     """契约：3 个域名 × 2 格（= 各 1 个账号），跑 4 个 ⇒ 3 成功 + 1 跳过。
 
