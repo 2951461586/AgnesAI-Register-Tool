@@ -362,7 +362,30 @@ SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] ...')
 | `400 Password must be at least 8 characters` | `rejected` | 改 `AR_PASSWORD_LEN` |
 | `400 Passwords do not match` | `rejected` | 内部 bug（两次密码不一致） |
 | `401 Invalid username or password` | `rejected` | 密码没生效 / 台账密码错 |
-| `5xx` / 超时 | `network` | 可重试（幂等请求自动重试一次） |
+| `5xx` / 超时 | `network` | **只有幂等只读**调用自动重试一次；写端点见下 |
 | 邮箱 Worker 读不出来 | `mail` | 看 Worker / D1，不是"邮件没到" |
 | 等码超时 | `rejected`（`MAIL_TIMEOUT`） | 确认 Worker 规则 / 域名 |
 | 网关 `401/403`（`/v1/models`） | `verify` | key 无效（非致命，账号仍算成功） |
+
+### `send_code` 撞 `network` 时**不重试** —— 这是查证过的决定
+
+`network` 里**只有幂等只读**调用（`user_self` / `balance` / `list_keys`）会自动
+重试一次。`send_code` / `register` / `login` / `create_key` **一律不重试**。
+
+2026-10-14 查了台账里 34 条 `network@code` 的**异常原文**：
+
+| 形态 | 条数 | 请求落地了吗 |
+| --- | --- | --- |
+| `RemoteDisconnected('Remote end closed connection without response')` | 25 | **可能已落地**（请求已写出） |
+| `SSLEOFError('[SSL: UNEXPECTED_EOF_WHILE_READING]')` | 9 | **可能已落地**（握手**之后**读到 EOF） |
+
+⇒ **34 条里 0 条属于"确定没落地"** ⇒ "只对没落地的重试"这条窄路
+**救不回任何一条**。而重试一条可能已落地的 `send_code` 会变成
+**第二封验证码 + 第二格服务端窗口**：代价确定，收益不确定。
+
+⚠ 差点归错：`SSLError` 望文生义会当成"TLS 握手失败（请求没出去）"，
+而实测原文是 `SSLEOFError`。**看异常原文，别看类名。**
+
+🔴 **不重试的实际代价比预想小**：2026-10-14 11:36 跑批里 3 条 `send_code`
+撞网络错误，因为请求**没完成**，所以**零验证码被烧**、零服务端窗口被白占 ——
+损失只是一个账号。（"码烧了账号还没了"是另一个问题，由 P6 的预留修复解决。）
