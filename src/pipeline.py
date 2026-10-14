@@ -103,18 +103,13 @@ STAGES = ("mailbox", "code", "register", "login", "key", "app", "verify")
 #    撞上限流墙时继续打只是白烧请求，而且**加深**服务端对这张 IP 的印象。
 QUOTA_STREAK_STOP = 2
 
-# 一个账号要打几枪**注册类**请求（`/api/verification` + `/api/user/register`）。
+# 一个账号要打几枪**注册类**请求。
 #
-# 🔴 这个数必须写下来，因为**服务端两道窗口都是按"请求"计的，而人想的是
-#    "账号"**：`AR_DOMAIN_MAX_PER_WINDOW=2` 的真实含义是**每小时 1 个账号**，
-#    不是 2 个 —— 一个账号要占两格。文档与 .env 里都写着"2 次"，很容易被
-#    读成"2 个账号"。
-#
-# 🔴 它还是域名维度**必须一次占够**的格数：注册时域名已定死在邮箱里、换不了，
-#    所以"只留 1 格就发码"= 码烧了、注册进不去。
-#    实测（2026-10-14，5 账号跑批）：3/5 就是这个形态 ——
-#    两个域名各 2/2 打满，而两条记录是 `code='ok(5 polls)'` + `register='failed'`。
-REQUESTS_PER_ACCOUNT = 2
+# 🔴 **真源在 `common/config.py`**（那里有完整的量化表：MAX=3 → 1 个账号）。
+#    这里只**转出**，不另写一个 `2`：`config.validate()/lint()` 要用它判断
+#    "窗口是不是连一个账号都装不下"，而 `common/` 是更低的层、不能反向 import
+#    `src/`。同一个事实写两处必然漂移，而这里的漂移形态是"静默少一半容量"。
+REQUESTS_PER_ACCOUNT = config.REQUESTS_PER_ACCOUNT
 
 # 密码字符集。**刻意不用 `string.punctuation`**：里面含 `"` / `\` / `'` / `` ` ``，
 # 而密码会被写进 JSON 台账、有时还要手打进浏览器 —— 那些字符在每一条路径上

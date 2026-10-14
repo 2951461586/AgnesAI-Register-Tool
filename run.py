@@ -41,7 +41,7 @@
   1 = 本批**全部失败**（配置 / 网络 / 服务端拒绝）
   2 = 本地配额闸门拦下（**一个请求都没发**）
   3 = 台账护栏触发（读源损坏 / 防静默缩水，拒绝写盘，避免丢账号）
-  4 = 缺少必需配置
+  4 = 配置有问题（缺凭据 / 值不合法，如窗口上限装不下一个账号）
   5 = 内部错误（记录序列化失败）
 """
 
@@ -113,12 +113,24 @@ def main(argv=None):
     # ── 启动校验：缺凭据就立刻失败，别等跑了一半才发现全是 401 ──────
     missing = config.validate()
     if missing:
-        print(f"✗ 缺少必需配置：{'、'.join(missing)}", file=sys.stderr)
-        print(
-            "  修法：cp .env.example .env 并填入真实值（.env 已在 .gitignore 中，不会进仓库）",
-            file=sys.stderr,
-        )
+        print(f"✗ 配置有问题：{'、'.join(missing)}", file=sys.stderr)
+        # ⚠ 这条修法**只对"凭据缺失"成立**。值不对的情况（如窗口上限比一个账号
+        #   需要的格数还小）后面自带括号说明，再塞一句"cp .env.example"会误导
+        #   —— 用户会去改 .env 的凭据，而真正要改的是那个数值。
+        #   判据：条目里**没有括号说明**的，就是"缺了某个凭据变量"。
+        if any("（" not in m for m in missing):
+            print(
+                "  修法：cp .env.example .env 并填入真实值（.env 已在 .gitignore 中，不会进仓库）",
+                file=sys.stderr,
+            )
         return 4
+
+    # 🔴 非致命警告（`config.lint()`）—— **不退出**。
+    #    这里放的是"能跑，但你在浪费容量 / 大概率误解了单位"：窗口上限按
+    #    `REQUESTS_PER_ACCOUNT` 量化，奇数会**静默**丢掉最后一格
+    #    （实测：`MAX=3` 看着像 3 个账号，实际只有 1 个）。
+    for warning in config.lint():
+        print(f"  ⚠ 配置提醒：{warning}", flush=True)
 
     # ── 台账读源：**在任何请求之前**读好 ──────────────────────
     # 🔴 为什么放在这里（跑批之前），而不是留到落盘阶段：读源损坏时落盘会失败，

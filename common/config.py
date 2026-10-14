@@ -193,10 +193,21 @@ VERIFY_TIMEOUT = _env_float("AR_VERIFY_TIMEOUT", 60)
 #   撞到服务端消息时：IP 维度 → 换出口；域名维度 → 换域名；换不动才退避。
 #
 # 🔴 单位是「**请求**」，不是一个账号一枪：`/api/verification` 与
-#    `/api/user/register` 共用同一张计数，所以 **2 次 = 1 个账号**
-#    （`REQUESTS_PER_ACCOUNT`，见 src/pipeline.py）。想跑 N 个账号就调成 ≥ 2N。
-#    这个单位被误读过一次（"2 次" → "2 个账号"），而误读的后果不是报错，
+#    `/api/user/register` 共用同一张计数，所以 **2 次 = 1 个账号**。
+#    想跑 N 个账号就把上限调到 ≥ `REQUESTS_PER_ACCOUNT * N`。
+#    这个单位被误读过（"2 次" → "2 个账号"），而误读的后果不是报错，
 #    是"码烧了、注册进不去"。
+#
+# 🔴🔴 **一个账号要 `REQUESTS_PER_ACCOUNT` 格，所以上限按这个数**量化**：
+#
+#      MAX=1  → **0 个账号**（连一个账号都装不下）
+#      MAX=2  → 1 个账号
+#      MAX=3  → **1 个账号**（第 3 格永远用不到 —— 静默浪费）
+#      MAX=4  → 2 个账号
+#
+#    奇数配置不会报错，只会**静默**少一半容量。所以 `validate()` 拦 < 2，
+#    `lint()` 对奇数发警告。改这里请连带改 `REQUESTS_PER_ACCOUNT` 的语义说明。
+REQUESTS_PER_ACCOUNT = 2
 REGISTER_MAX_PER_WINDOW = max(1, _env_int("AR_REGISTER_MAX_PER_WINDOW", 2))
 REGISTER_WINDOW_S = max(1.0, _env_float("AR_REGISTER_WINDOW_S", 3600.0))
 # 域名维度的窗口。与 IP 维度**分开配** —— 它们的真实长度未必相同，
@@ -384,7 +395,52 @@ def validate() -> list[str]:
     # 那是配置错误 —— 会在第一个账号上以"create_mailbox failed"的形式炸出来。
     if os.getenv("AR_MAIL_DOMAINS", "").strip() and not MAIL_DOMAINS:
         missing.append("AR_MAIL_DOMAINS（写了但解析出空列表）")
+    # 🔴 窗口比"一个账号要的格数"还小 ⇒ **永远跑不出账号**（`floor(MAX/2) == 0`）。
+    #    这是个**静默失效**：不报错、不警告，只是每个账号都被本地闸门 skip 掉，
+    #    现象看着像"域名全被限流"。所以提前到启动阶段报出来。
+    for name, val in (
+        ("AR_REGISTER_MAX_PER_WINDOW", REGISTER_MAX_PER_WINDOW),
+        ("AR_DOMAIN_MAX_PER_WINDOW", DOMAIN_MAX_PER_WINDOW),
+    ):
+        if val < REQUESTS_PER_ACCOUNT:
+            missing.append(
+                f"{name}（{val} < {REQUESTS_PER_ACCOUNT}，一个账号要 "
+                f"{REQUESTS_PER_ACCOUNT} 次注册类请求 ⇒ 永远跑不出账号）"
+            )
     return missing
+
+
+def lint() -> list[str]:
+    """返回**非致命**的配置警告（空列表 = 没问题）。
+
+    与 `validate()` 的分工：`validate()` 是"不修就跑不了"（入口直接退出）；
+    这里是"能跑，但你在浪费容量 / 大概率是误解了单位"，只打一行提醒。
+
+    🔴 为什么单独一个函数而不是塞进 `validate()`：`validate()` 的每一项都会
+      让入口 `return 4`。把"奇数窗口"这种**能跑但浪费**的事做成硬失败，
+      会让用户以为工具坏了 —— 而那正是它要防的那种沟通失败。
+    """
+    warn = []
+    # 奇数上限：`floor(MAX / REQUESTS_PER_ACCOUNT)` 会静默丢掉余数。
+    # 实测（2026-10-14）本项目的配置注释曾把 "2 次" 读成 "2 个账号"，
+    # 而 `MAX=3` 看起来像"3 个账号"，实际只有 1 个。
+    for name, val in (
+        ("AR_REGISTER_MAX_PER_WINDOW", REGISTER_MAX_PER_WINDOW),
+        ("AR_DOMAIN_MAX_PER_WINDOW", DOMAIN_MAX_PER_WINDOW),
+    ):
+        # ⚠ `val < REQUESTS_PER_ACCOUNT` 已经被 `validate()` 硬拦了，
+        #   这里不再重复报 —— 否则会给出"建议改成 0"这种**没意义**的建议
+        #   （0 格等于关掉闸门），而一条荒谬的建议会让人不再信任整个 lint。
+        if val < REQUESTS_PER_ACCOUNT:
+            continue
+        if val % REQUESTS_PER_ACCOUNT:
+            usable = val - val % REQUESTS_PER_ACCOUNT
+            warn.append(
+                f"{name}={val} 是奇数 ⇒ 只有前 {usable} 格能用，"
+                f"第 {val} 格永远用不到（= {usable // REQUESTS_PER_ACCOUNT} 个账号）。"
+                f"建议改成 {usable} 或 {usable + REQUESTS_PER_ACCOUNT}。"
+            )
+    return warn
 
 
 def mail_domains() -> list[str]:
