@@ -477,11 +477,14 @@ def test_5xx_sets_last_error_but_4xx_raises():
         c2.wait_for_mail("x@smailr.com", timeout=5, interval=0.01)
 
 
-# ── 清理（成功落库之后）──────────────────────────────────────────
-def test_cleanup_only_touches_successful_smailr_records(monkeypatch):
-    """🔴 只删**成功**的、且**属于 smailr** 的。
+# ── 清理（落盘之后：success + skipped）──────────────────────────────────────────
+def test_cleanup_settles_success_and_skipped_but_keeps_failed(monkeypatch):
+    """🔴 只删**已了结**的、且**属于 smailr**的：`success` + `skipped`。
 
     ⚠ 失败的账号**不能**删它的邮箱：那个账号可能要重跑，而邮箱是它唯一的收信地址。
+    ⚠ `skipped` 那一条是**防御性**的（当前所有 skip 路径都在 `create_mailbox`
+      之前）—— 但契约要写死：只要一条 `skipped` 带了地址，它就该被清掉，
+      而不是静默占着 smailr 的 100 邮箱额度。
     """
     deleted = []
 
@@ -494,13 +497,102 @@ def test_cleanup_only_touches_successful_smailr_records(monkeypatch):
 
     monkeypatch.setattr(mailbox, "SmailrClient", lambda: FakeClient())
     records = [
-        {"status": "success", "email": "a@smailr.com", "mail_domain": "smailr.com"},
-        {"status": "failed", "email": "b@smailr.com", "mail_domain": "smailr.com"},  # 失败：不删
-        {"status": "success", "email": "c@catchmail.io", "mail_domain": "catchmail.io"},  # 别的源
-        {"status": "success", "email": "d@own.example", "mail_domain": "own.example"},  # 别的源
+        {
+            "status": "success",
+            "email": "a@smailr.com",
+            "mail_domain": "smailr.com",
+            "mailboxes_created": ["a@smailr.com"],
+        },
+        # 失败：不删
+        {
+            "status": "failed",
+            "email": "b@smailr.com",
+            "mail_domain": "smailr.com",
+            "mailboxes_created": ["b@smailr.com"],
+        },
+        # 🔴 跳过：删 —— 邮箱建出来了，但账号没建成
+        {
+            "status": "skipped",
+            "email": "e@smailr.com",
+            "mail_domain": "smailr.com",
+            "mailboxes_created": ["e@smailr.com"],
+        },
+        # 跳过但**没建出邮箱**（如“域名窗口装不下两枪”）：没有地址可删
+        {"status": "skipped", "email": "", "mail_domain": "", "mailboxes_created": []},
+        # 别的源：不删
+        {
+            "status": "success",
+            "email": "c@catchmail.io",
+            "mail_domain": "catchmail.io",
+            "mailboxes_created": ["c@catchmail.io"],
+        },
+        {
+            "status": "success",
+            "email": "d@own.example",
+            "mail_domain": "own.example",
+            "mailboxes_created": ["d@own.example"],
+        },
     ]
-    out = mailbox.cleanup_successful(records, log=lambda *_: None)
-    assert deleted == ["a@smailr.com"]
+    out = mailbox.cleanup_settled(records, log=lambda *_: None)
+    assert deleted == ["a@smailr.com", "e@smailr.com"]
+    assert out == {"deleted": 2, "failed": 0}
+
+
+def test_cleanup_deletes_every_created_mailbox_not_just_the_last(monkeypatch):
+    """🔴 回归：一条账号**换域名时建过多个邮箱** ⇒ 清理要逐个删。
+
+    只删 `email`（最后一个）会让中间那些**静默**占着 smailr 的 100 邮箱上限 ——
+    不可见、不报错，跑几十个就卡死。
+    """
+    deleted = []
+
+    class FakeClient:
+        last_error = ""
+
+        def delete_mailbox(self, email):
+            deleted.append(email)
+            return True
+
+    monkeypatch.setattr(mailbox, "SmailrClient", lambda: FakeClient())
+    records = [
+        {
+            "status": "success",
+            "email": "b@loc.cc",  # `email` 只是最后一个
+            "mail_domain": "loc.cc",
+            "mailboxes_created": ["a@smailr.com", "b@loc.cc"],
+        }
+    ]
+    out = mailbox.cleanup_settled(records, log=lambda *_: None)
+    assert deleted == ["a@smailr.com", "b@loc.cc"]
+    assert out == {"deleted": 2, "failed": 0}
+
+
+def test_cleanup_judges_the_source_per_address_not_by_mail_domain(monkeypatch):
+    """🔴 判据是**按地址**判源，不是按 `mail_domain`。
+
+    一条账号可能**跨源轮换**（smailr → catchmail），而 `mail_domain` 只记最后一个
+    ⇒ 按它判会把中间那个 smailr 邮箱整个漏掉（而它正是占额度的那一个）。
+    """
+    deleted = []
+
+    class FakeClient:
+        last_error = ""
+
+        def delete_mailbox(self, email):
+            deleted.append(email)
+            return True
+
+    monkeypatch.setattr(mailbox, "SmailrClient", lambda: FakeClient())
+    records = [
+        {
+            "status": "success",
+            "email": "z@mailistry.com",
+            "mail_domain": "mailistry.com",  # 最后一个源是 catchmail
+            "mailboxes_created": ["a@smailr.com", "z@mailistry.com"],
+        }
+    ]
+    out = mailbox.cleanup_settled(records, log=lambda *_: None)
+    assert deleted == ["a@smailr.com"]  # 只有 smailr 那个被删
     assert out == {"deleted": 1, "failed": 0}
 
 
@@ -509,6 +601,10 @@ def test_cleanup_never_deletes_a_reused_mailbox(monkeypatch):
 
     这条冲突是**真实的**（不是假想）：实测里 `create_mailbox` 已经会走复用路径
     （等级 403 → 领现成的）。若还删它，第一个账号成功之后池子就空了。
+
+    ⚠ 机制上它天然安全：复用的地址**不会进 `mailboxes_created`**（`provision`
+      就不往里写）⇒ 清理看不到它。所以这里**不能**再用 `mail_reused` 当判据 ——
+      一条账号完全可以“先新建一个、后来复用了一个”，而那个新建的**该删**。
     """
     deleted = []
 
@@ -527,16 +623,18 @@ def test_cleanup_never_deletes_a_reused_mailbox(monkeypatch):
             "email": "new@smailr.com",
             "mail_domain": "smailr.com",
             "mail_reused": False,
+            "mailboxes_created": ["new@smailr.com"],
         },
-        # 复用的 → **不删**（那是用户预先建好的池子）
+        # 复用的 → **不删**（那是用户预先建好的池子）；它不在 `mailboxes_created` 里
         {
             "status": "success",
             "email": "pool@smailr.com",
             "mail_domain": "smailr.com",
             "mail_reused": True,
+            "mailboxes_created": [],
         },
     ]
-    out = mailbox.cleanup_successful(records, log=lambda *_: None)
+    out = mailbox.cleanup_settled(records, log=lambda *_: None)
     assert deleted == ["new@smailr.com"]
     assert out == {"deleted": 1, "failed": 0}
 
@@ -549,8 +647,15 @@ def test_cleanup_reports_failures_without_raising(monkeypatch):
             return False
 
     monkeypatch.setattr(mailbox, "SmailrClient", lambda: FakeClient())
-    out = mailbox.cleanup_successful(
-        [{"status": "success", "email": "a@smailr.com", "mail_domain": "smailr.com"}],
+    out = mailbox.cleanup_settled(
+        [
+            {
+                "status": "success",
+                "email": "a@smailr.com",
+                "mail_domain": "smailr.com",
+                "mailboxes_created": ["a@smailr.com"],
+            }
+        ],
         log=lambda *_: None,
     )
     assert out == {"deleted": 0, "failed": 1}
@@ -561,4 +666,4 @@ def test_cleanup_is_a_noop_without_smailr_records(monkeypatch):
         raise AssertionError("不该建客户端")
 
     monkeypatch.setattr(mailbox, "SmailrClient", boom)
-    assert mailbox.cleanup_successful([], log=lambda *_: None) == {"deleted": 0, "failed": 0}
+    assert mailbox.cleanup_settled([], log=lambda *_: None) == {"deleted": 0, "failed": 0}

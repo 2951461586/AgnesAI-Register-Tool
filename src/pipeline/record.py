@@ -132,6 +132,15 @@ class AccountRecord:
     #    账号就没得用（而删新建的是对的：smailr 有 100 个邮箱上限）。
     #    所以这个事实必须**进台账**，而不只活在内存里。
     mail_reused: bool = False
+    # 🔴 **本账号新建过的所有收信地址**（换域名会**重建邮箱** ⇒ 可能好几个）。
+    #
+    #    为什么必须记全：清理 smailr 邮箱时只删最后一个 `email`，会让**中间**那些
+    #    静默占着上限（实测 `mailbox_limit=100`）—— 不可见、不报错。
+    #
+    #    ⚠ **复用的地址不在里面**：那是用户预先建好的池子（等级不够时只能领现成的），
+    #      删了下一个账号就没得用。所以这个列表同时就是"**该删的集合**"
+    #      （`mailbox.cleanup_settled` 的输入）。
+    mailboxes_created: list[str] = field(default_factory=list)
     # 控制台账号标识（来自 `/api/user/self` 与登录响应里的 `user`）。
     user_id: str = ""
     user_uuid: str = ""
@@ -223,6 +232,7 @@ class AccountRecord:
             "password": self.password,
             "mail_domain": self.mail_domain,
             "mail_reused": self.mail_reused,
+            "mailboxes_created": list(self.mailboxes_created),
             "user_id": self.user_id,
             "user_uuid": self.user_uuid,
             "display_id": self.display_id,

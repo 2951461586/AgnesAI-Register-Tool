@@ -219,6 +219,60 @@ def test_all_attempts_eaten_by_local_gate_is_skipped_not_mail_timeout(monkeypatc
     assert rec.stages["code"] != "failed"  # 不是那个假的“等码超时”
 
 
+def test_send_code_rejected_then_rotation_exhausted_is_failed_not_skipped(monkeypatch):
+    """🔴 回归（2026-10-15 实测）：`send_code` **已经发出去并被服务端限流拒了**、
+    之后本地闸门把剩余尝试全换成“换维度”时，必须记 `failed`/`quota`，
+    而不是 `skipped`/`quota_guard`。
+
+    缺陷形态：`provision` 的 `for…else` 分支只考虑了“每次尝试都在循环顶部被
+    换掉”（= 一个请求都没发）。但 `except AgnesQuota` 那条路**也会** `continue`
+    —— 于是“发过一枪、被限流”的账号会走到同一个 else，被标成 `skipped`，
+    消息还写着“一个验证码请求都没发出去”（假话），违反项目自己的硬定义：
+    `skipped` = 没试过 / `failed` = 试过了不行。
+
+    机器可查证据：台账里有 `skipped` 记录带 `stages.mailbox == 'ok'` ——
+    而 `mark_ok("mailbox")` 之后**唯一**的语句就是 `send_code`。
+
+    用 2 个域名 + 2 个出口把这条路径钉成确定性的：
+
+        attempt 0：a.com 预留 2 格 → 建邮箱 → 发码 → **IP 限流** → 换出口 → continue
+        attempt 1（最后一次）：a.com 只剩 0 格、还差 1 格 → 换到 b.com → continue
+        ⇒ 循环耗尽（else）。而这时**已经发过一枪**。
+    """
+    from src.agnes import AgnesQuota
+
+    monkeypatch.setattr(P.config, "mail_domains", lambda: ["a.com", "b.com"])
+    monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 2)  # = 1 个账号
+    monkeypatch.setattr(P.config, "DOMAIN_WINDOW_S", 3600.0)
+    monkeypatch.setattr(P.config, "REGISTER_MAX_PER_WINDOW", 100)  # 隔离出 IP 维度
+    monkeypatch.setattr(P.config, "REGISTER_WINDOW_S", 1.0)
+    monkeypatch.setattr(P.config, "REGISTER_RETRIES", 1)
+    _patch_verify(monkeypatch)
+
+    client = FakeClient(
+        send_error=AgnesQuota("Too many registration attempts from this IP. Please try again later")
+    )
+    results = P.run_batch(
+        count=1,
+        producers=1,
+        workers=1,
+        verbose=False,
+        mail_factory=lambda domain=None: FakeMail(),
+        client_factory=lambda proxy=None: client,
+        # ≥ 2 个出口，`_rotate_slot` 才换得动（换不动就走退避，不是这条路径）
+        slot_pool=SlotPool(["s1", "s2"]),
+    )
+    rec = results[0]
+
+    assert client.calls == ["send_code"], client.calls  # 🔴 确实发过一枪
+    assert rec.stages["mailbox"] == "ok"
+    assert rec.status == "failed", (rec.status, rec.error)
+    assert P.error_kind_of(rec) == P.ERR_QUOTA, (rec.error_kind, rec.error)
+    assert rec.stages["code"] == "failed"
+    # 🔴 措辞必须如实：这一枪发出去了
+    assert "一个验证码请求都没发出去" not in rec.error, rec.error
+
+
 def test_register_loop_exhausted_is_not_marked_ok(monkeypatch):
     """🔴 回归：注册循环的尝试被「换出口」吃光时，**绝不能**标成 ok。
 
@@ -529,6 +583,55 @@ def test_send_code_network_failure_charges_exactly_one_grid(monkeypatch):
     # 🔴 恰好扣 1 格：0 = 太松（比服务端松），2 = 太紧（把注册那格也白占）
     room = P.domain_limiter("only.com").room()
     assert room == 1, f"应扣 1 格 ⇒ room=1；实际 room={room}"
+
+
+def test_provision_records_every_created_mailbox_across_domain_rotation(monkeypatch):
+    """🔴 契约：`mailboxes_created` 记下**本账号建过的每一个**邮箱。
+
+    为什么必须记全（而不是只留最后一个 `email`）：`provision` 换域名时会
+    **重建邮箱**（域名是邮箱地址的一部分），所以一条账号可能建过好几个。
+    只记最后一个 ⇒ 中间那些既不在台账、也不在清理目标里，**静默**占着
+    smailr 的 100 邮箱上限（不可见、不报错）。
+
+    这里让 `send_code` 每次都撞**域名**限流（⇒ 换域名而不是换出口），
+    把“建两个邮箱”钉成确定性的：
+
+        attempt 0：a.com 预留 2 格 → 建 box@a.com → 发码 → **域名限流** → 换域名
+        attempt 1：b.com 预留 2 格 → 建 box@b.com → 发码 → 域名限流 → 重试耗尽 ⇒ failed
+    """
+    from src.agnes import AgnesQuota
+
+    monkeypatch.setattr(P.config, "mail_domains", lambda: ["a.com", "b.com"])
+    monkeypatch.setattr(P.config, "DOMAIN_MAX_PER_WINDOW", 2)  # = 1 个账号
+    monkeypatch.setattr(P.config, "DOMAIN_WINDOW_S", 3600.0)
+    monkeypatch.setattr(P.config, "REGISTER_MAX_PER_WINDOW", 100)
+    monkeypatch.setattr(P.config, "REGISTER_WINDOW_S", 1.0)
+    monkeypatch.setattr(P.config, "REGISTER_RETRIES", 1)
+    _patch_verify(monkeypatch)
+
+    class DomainMail(FakeMail):
+        """地址跟着域名走 —— 否则两个邮箱同名，去重会把第二个吞掉。"""
+
+        def create_mailbox(self, domain=None, count=1):
+            return [f"box@{domain}"]
+
+    client = FakeClient(
+        send_error=AgnesQuota("Too many registration attempts from this email domain")
+    )
+    results = P.run_batch(
+        count=1,
+        producers=1,
+        workers=1,
+        verbose=False,
+        mail_factory=lambda domain=None: DomainMail(),
+        client_factory=lambda proxy=None: client,
+        slot_pool=SlotPool([]),
+    )
+    rec = results[0]
+
+    assert client.calls == ["send_code", "send_code"], client.calls  # 换域名后又打了一枪
+    assert rec.mailboxes_created == ["box@a.com", "box@b.com"]
+    assert rec.email == "box@b.com"  # `email` 仍然是最后一个
 
 
 def test_batch_does_not_burn_codes_when_domains_run_out(monkeypatch):

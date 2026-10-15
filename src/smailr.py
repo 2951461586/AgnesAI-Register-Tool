@@ -40,7 +40,7 @@
 =====================================
 smailr 账号有**邮箱总数上限**（实测 `mailbox_limit=100`），而每个账号占一个
 邮箱 ⇒ 不删会跑几十个就卡死。所以 `delete_mailbox()` 是本源的**契约扩展**，
-由 `mailbox.cleanup_successful()` 在**台账写盘之后**调用。
+由 `mailbox.cleanup_settled()` 在**台账写盘之后**调用。
 ⚠ 删除不可逆，但那时账号已进台账；台账里存的是 Agnes 的凭据（密码/JWT/
   `sk-` key），与收信邮箱无关 ⇒ 删掉不影响账号可用性。
 
@@ -348,7 +348,7 @@ class SmailrClient:
         return ""
 
     def delete_mailbox(self, address: str) -> bool:
-        """删掉一个邮箱（**成功落库后**由 `mailbox.cleanup_successful()` 调用）。
+        """删掉一个邮箱（**落盘之后**由 `mailbox.cleanup_settled()` 调用）。
 
         🔴 为什么必须删：smailr 账号有**邮箱总数上限**（实测 `mailbox_limit=100`），
           而每个账号占一个 ⇒ 不删跑几十个就卡死。

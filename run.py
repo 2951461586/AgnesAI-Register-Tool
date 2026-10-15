@@ -286,15 +286,16 @@ def main(argv=None):
         print(f"✗ {ex}", file=sys.stderr)
         return 3
 
-    # ── 成功落库后清理 smailr 邮箱 ────────────────────────────────
+    # ── 落库后清理 smailr 邮箱 ────────────────────────────────
     # 🔴 **必须在这里**（落盘之后），而不是 `finish()` 里：删除**不可逆**，
     #    而"账号已进台账"是唯一的安全点 —— 万一落盘失败，邮箱还在，还能重跑。
     # 🔴 为什么删：smailr 账号有**邮箱总数上限**（实测 `mailbox_limit=100`），
     #    而每个账号占一个 ⇒ 不删跑几十个就卡死。
+    # ⚠ 清的是**已了结**的（`success` + `skipped`），`failed` 留着（可能要重跑）。
     # ⚠ 非致命：删不掉只告警（账号已经存好了）。
     if config.SMAILR_DELETE_AFTER_SUCCESS:
         try:
-            _mailbox.cleanup_successful(new_records)
+            _mailbox.cleanup_settled(new_records)
         except Exception as ex:  # noqa: BLE001
             # 清理是**尽力而为**：连不上 smailr 也不该让一次成功的跑批变红。
             print(f"  ⚠ smailr 邮箱清理未完成：{type(ex).__name__}: {ex}", flush=True)

@@ -75,6 +75,9 @@ def provision(
     rotated_slots: list[str] = []
     waited = 0.0
     sent_at = 0
+    # 真正**发出去了几枪**验证码请求。`for…else` 的收尾靠它区分
+    # "没试过"（`skipped`）与"试过了不行"（`failed`）—— 见 else 分支。
+    sent_attempts = 0
     t1 = time.time()
     for attempt in range(config.REGISTER_RETRIES + 1):
         # ── IP 维度（按出口）：只要 1 格 ───────────────────────────
@@ -169,6 +172,12 @@ def provision(
         #    复用的邮箱是**用户预先建好的池子**，删了下一个账号就没得用；
         #    而删新建的是对的（smailr 有 100 个邮箱上限）。
         rec.mail_reused = bool(getattr(mail, "reused", False))
+        # 🔴 记下**新建**的每一个地址：换域名会**重建邮箱**（域名是地址的一部分），
+        #    所以一条账号可能建过好几个。只留最后一个会让**中间**那些静默泄漏
+        #    （清理只看 `email`）。
+        #    ⚠ 复用的**不进列表** —— 那是用户预先建好的池子（见 `cleanup_settled`）。
+        if address and not rec.mail_reused and address not in rec.mailboxes_created:
+            rec.mailboxes_created.append(address)
         if not rec.timings.get("mailbox_ms"):
             rec.timings["mailbox_ms"] = int((time.time() - t0) * 1000)
         rec.mark_ok("mailbox")
@@ -186,6 +195,9 @@ def provision(
         #    ⚠ 实测踩到：一次跑批 3 条 `send_code` 撞网络错误，域名窗口**各扣 0 格**
         #      （预留 2 格被全数还回）。
         reservation.consume()
+        # 🔴 在**调用之前**记这一枪：网络层失败（`RemoteDisconnected` /
+        #    `SSLEOFError`）的请求**可能已经落地** —— 那也算"发出去了"。
+        sent_attempts += 1
         try:
             ticket.client.send_code(rec.email)
         except AgnesQuota as ex:
@@ -216,30 +228,47 @@ def provision(
         # 发码成功：那一格已在**调用前**扣掉，剩下的留给 `finish` 的首次注册。
         break
     else:
-        # 🔴 循环**没有 `break`** 就结束了 ⇒ **一次验证码都没发出去**：
-        #    每一次尝试都被上面的"本地闸门等不起 → 换维度"给 `continue` 掉了
-        #    （IP 窗口与域名窗口都满，换不动）。
+        # 🔴 循环**没有 `break`** 就结束了。这里其实有**两种形态**，必须分开 ——
+        #    老实现把两种都当成第一种，于是把"发过枪"的账号误标成 `skipped`。
         #
-        #    🔴 这里**绝不能**落到下面的 `wait_for_code`：那会抱着
-        #    `MAIL_POLL_TIMEOUT`（默认 120s）等一封**从来没被请求过**的信，
-        #    最后报 `等码超时`（`rejected`）—— 而真相是"一个注册请求都没发"。
-        #    实测踩到：10 批里 5 次这样的**假 `rejected`**，把排查引向
-        #    "Worker 没收到信 / 域名白名单"，与真实原因（本地闸门）恰好相反。
+        #   A. `sent_attempts == 0` —— 一次验证码都没发出去：每一次尝试都被
+        #      上面的"本地闸门等不起 → 换维度"给 `continue` 掉了
+        #      （IP 窗口与域名窗口都满，换不动）。
+        #      ⇒ 按项目定义是 `skipped`（没试过），抛 `WindowBusy`。
+        #
+        #   B. `sent_attempts > 0` —— **发过枪**，只是那一枪被服务端限流拒了
+        #      （`except AgnesQuota` 那条路**也会** `continue`），之后剩下的
+        #      尝试才被换维度吃掉。⇒ 这是"试过了，不行"，必须是
+        #      `failed`/`quota`，抛 `AgnesQuota`。
+        #
+        # 🔴 实测踩到（2026-10-15）：台账里有 `skipped` 记录带着
+        #    `stages.mailbox == 'ok'` —— 而 `mark_ok("mailbox")` 之后**唯一**
+        #    的语句就是 `send_code`。即那些账号**确实发过请求**，却被标成
+        #    `skipped`，消息还写着"一个验证码请求都没发出去"（**假话**）。
         #    项目对这两种状态的区分是硬要求：`skipped` = 没试过，
         #    `failed` = 试过了不行。
         #
-        #    抛 `WindowBusy` ⇒ `classify` → `quota_guard` ⇒ 生产者按
-        #    **`skipped`** 记账（且**不**计入配额尝试）—— 与语义一致。
+        # 🔴 两种都不能落到下面的 `wait_for_code`：那会抱着
+        #    `MAIL_POLL_TIMEOUT`（默认 120s）等一封**从来没被请求过**的信，
+        #    最后报 `等码超时`（`rejected`）—— 与真相恰好相反。
+        #    （实测踩到：10 批里 5 次这样的**假 `rejected`**。）
         reservation.release()
-        # 🔴 消息里**带上两个维度的剩余等待时间**：原来说的是"IP / 域名窗口都满"，
-        #    读者无法判断"该等 5 分钟还是该换池子"。实测（2026-10-14）这条消息
-        #    出现过一次，而真相是"出口池里还有 3 个空槽位、只是选错了"——
-        #    数字能直接指向那种情况。
+        # 🔴 消息里**带上两个维度的剩余等待时间**：让人能判断"该等 5 分钟还是
+        #    该换池子"。⚠ 它们报的是**当前**（换过之后）的窗口 —— 所以 0s
+        #    不代表"从来没满过"，别把 0s 读成"窗口是空的却跳过了"。
+        ip_wait_now = register_limiter(ticket.proxy).wait_time()
+        dom_wait_now = domain_limiter(domain).wait_time()
+        if sent_attempts:
+            raise AgnesQuota(
+                f"已发出 {sent_attempts} 次验证码请求但都被服务端限流"
+                f"（Too many registration attempts），"
+                f"本地闸门轮换 {config.REGISTER_RETRIES + 1} 次后仍拿不到名额"
+                f"（出口窗口还要等 {ip_wait_now:.0f}s，域名窗口还要等 {dom_wait_now:.0f}s）"
+            )
         raise WindowBusy(
             f"本地闸门把 {config.REGISTER_RETRIES + 1} 次尝试全部换掉了，"
             f"一个验证码请求都没发出去"
-            f"（出口窗口还要等 {register_limiter(ticket.proxy).wait_time():.0f}s，"
-            f"域名窗口还要等 {domain_limiter(domain).wait_time():.0f}s）"
+            f"（出口窗口还要等 {ip_wait_now:.0f}s，域名窗口还要等 {dom_wait_now:.0f}s）"
         )
     rec.timings["code_send_ms"] = int((time.time() - t1) * 1000)
     if waited:
