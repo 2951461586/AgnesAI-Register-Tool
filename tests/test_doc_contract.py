@@ -335,3 +335,64 @@ def test_no_bare_measured_window_value_outside_protocol():
         + "\n  ".join(offenders)
         + "\n  修法：改成引用 `docs/protocol.md` §3 —— 那个数字只在那边维护。"
     )
+
+
+# ── captcha（2026-10-15 服务端新增的门）───────────────────────────────
+def test_protocol_md_records_the_captcha_gate():
+    """🔴 守卫：captcha 这条**推翻前提**的事实必须留在唯一真源里。
+
+    为什么值得一条用例：它是本项目**最贵的一条知识** —— 它推翻了“零浏览器”
+    这个前提，而那个前提被 6 个文件当前提引用（分两段的理由、依赖面只有
+    `requests`）。事实若只活在聊天记录 / 一次跑批日志里，下一个人就会重新
+    基于错前提做决定 —— 而本项目已经栽过同一类事故 4 次（见本文件开头）。
+    """
+    text = (ROOT / "docs" / "protocol.md").read_text(encoding="utf-8")
+    assert "Captcha verification is required" in text, "protocol.md 里没有 captcha 的实测原文"
+    assert "2026-10-15" in text, "protocol.md 里没有 captcha 的观测日期"
+
+
+def test_zero_browser_claim_must_acknowledge_the_captcha_gate():
+    """🔴 守卫：说“零浏览器”的文件必须**同时**提到 captcha。
+
+    2026-10-15 16:24 起 ②发验证码 要求 captcha ⇒ “零浏览器”不再是无条件事实。
+    留着旧断言**不会报错**，只会让人基于错的前提做决定 —— 与
+    `test_rate_limit_docs_point_at_the_single_source` 同一类**结构**守卫：
+    只查“有没有指针”，不判断语气（后者只能靠人读）。
+
+    ⚠ 范围是**声称过零浏览器的文件**（README / protocol / config / run.py /
+      agnes / pipeline）—— 新增一处“零浏览器”就把它加进来。
+    """
+    files = (
+        "README.md",
+        "docs/protocol.md",
+        "common/config.py",
+        "run.py",
+        "src/agnes.py",
+        "src/pipeline/__init__.py",
+    )
+    offenders = []
+    for rel in files:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        if "零浏览器" in text and "captcha" not in text.lower():
+            offenders.append(rel)
+    assert not offenders, (
+        f"这些文件说了“零浏览器”却没提到 captcha：{offenders}\n"
+        f"  2026-10-15 16:24 起 ②发验证码 要求 captcha（见 docs/protocol.md §2②）——\n"
+        f"  “零浏览器”不再是无条件事实，旧断言必须就地注明这一点。"
+    )
+
+
+# ── 文档格式（markdownlint）───────────────────────────────────────
+def test_markdownlint_config_exists_because_docs_claim_it():
+    """🔴 守卫：`docs/README.md` 说“格式由 markdownlint 兜底”，就必须真有那份配置。
+
+    与 `test_ci_claim_implies_ci_config_exists` 同形：**说了有 X 就必须真有** ——
+    否则“标准在脑子里”与“标准在文件里”长得一模一样，而只有后者会被执行。
+    （本项目已栽过两次：`exports/` 的 gitignore、`pyproject` 里的 secret-scan job。）
+    """
+    cfg = ROOT / ".markdownlint.jsonc"
+    assert cfg.is_file(), "docs/README.md 声称 markdownlint 是文档格式标准，但配置不存在"
+    text = cfg.read_text(encoding="utf-8")
+    assert '"dash"' in text, "项目符号标准必须是 dash（见配置里的理由注释）"
+    # 声称“不卡行宽”就得真的关掉 MD013 —— 否则标准与文档说的不是一回事
+    assert re.search(r'"MD013"\s*:\s*false', text), "docs 说“不卡行宽”，但配置里没关 MD013"

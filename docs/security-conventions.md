@@ -19,36 +19,47 @@
 
 ## 2. 终端输出
 
-* **代理串**一律过 `redact.redact_url()`（`user:pass@` → `***`）。
-* **邮箱**在终端 / 报告里过 `redact.redact_email()`（保留域名，本地部分打码）；
+- **代理串**一律过 `redact.redact_url()`（`user:pass@` → `***`）。
+- **邮箱**在终端 / 报告里过 `redact.redact_email()`（保留域名，本地部分打码）；
   **台账里存明文**（那是账号台账，本来就要能找回账号）。
-* **`sk-` key 在报告里打码**（`sk-123456…ghij`）—— 整把 key 已经落进台账，
+- **`sk-` key 在报告里打码**（`sk-123456…ghij`）—— 整把 key 已经落进台账，
   而终端这一行最容易被贴进 issue / 截图。
-* **出口 IP 是故意打印的**（槽位报告要按出口看额度），但正因如此，
+- **出口 IP 是故意打印的**（槽位报告要按出口看额度），但正因如此，
   **那段输出不要粘进任何仓库 / issue**。
-* 别把 `AR_PROXY=<完整串>` 或 JWT 原样 print。
+- 别把 `AR_PROXY=<完整串>` 或 JWT 原样 print。
 
-## 3. 路径
+## 3. 路径与基础设施标识
 
-* 输出里的路径一律过 `ledger.repo_rel()`，相对仓库根 —— **不带盘符 + 用户名**。
-* 文档里不写本机绝对路径，用占位符（`<worker>.<sub>.workers.dev`）。
+- 输出里的路径一律过 `ledger.repo_rel()`，相对仓库根 —— **不带盘符 + 用户名**。
+- 文档里不写本机绝对路径，用占位符（`<worker>.<sub>.workers.dev`）。
+- 🔴 **自有域名 / 出口 IP / 代理网关也必须用占位符** —— 它们与路径同类：
+  可被搜索、容易被盯上。
+  ⚠ 实测漂移（2026-10-15 推送前扫描发现）：`docs/protocol.md` 与
+  `common/config.py` 里一度写着**真实的自有域名、真实出口 IP、真实代理网关**，
+  而 §1 已经把 `AR_WORKER_DOMAIN` / `AR_PROXY*` 归为"基础设施标识、不进源码"
+  ⇒ 又一次**规范与实现脱钩**（与 `exports/` 那次同形）。
+  约定（与同族公开仓库一致）：
+  - 自有域名 → `own.example` / `sub.own.example`（**保住"主域 vs 子域"这层语义**，
+    否则"子域是不是独立窗口"那条实测证据会读不懂）；
+  - 出口 IP → **文档段** `203.0.113.x`（RFC 5737 TEST-NET-3）；
+  - 代理网关 → `<proxy-gateway>`。
 
 ## 4. 状态文件
 
-* `ledger/`（台账）、`state/`（配额计数）、`exports/`（`export_keys.py` 导出的
+- `ledger/`（台账）、`state/`（配额计数）、`exports/`（`export_keys.py` 导出的
   明文 `sk-` key）**整目录** gitignore，不靠 `*.json` 通配兜底 —— 通配符一旦
   被某个 `!` 例外打穿，泄漏的就是整本账号。
   ⚠ `exports/` 曾经**漏在名单外**，而 `export_keys.py` 的 docstring 已经写着
   「在 `.gitignore` 里」⇒ 承诺与实现脱钩，是最难被发现的一类泄漏。
   **任何新增的凭据落点目录，先加到这里再写代码。**
-* `.env` 单独排除，模板见 `.env.example`（**不含真实值**）。
+- `.env` 单独排除，模板见 `.env.example`（**不含真实值**）。
 
 ## 5. 测试约定
 
-* 用例**断言契约**（字段名、分类、合并语义），不断言宿主环境
+- 用例**断言契约**（字段名、分类、合并语义），不断言宿主环境
   （本机路径 / 网络 / 时钟精度）。
-* **隔离本地状态**：`tests/conftest.py` 把 `AR_QUOTA_STATE` 钉在 tmp 目录 ——
+- **隔离本地状态**：`tests/conftest.py` 把 `AR_QUOTA_STATE` 钉在 tmp 目录 ——
   不隔离的话，跑一次测试会往真实计数文件里写记录，从而影响**下一次真实跑批**。
-* `src/` 与 `common/` 的依赖面由 `tests/test_dependency_surface.py` 钉住：
+- `src/` 与 `common/` 的依赖面由 `tests/test_dependency_surface.py` 钉住：
   只允许标准库 + `requests`。要加依赖，先改白名单，再改 `pyproject.toml` ——
   两处都改才说明是"有意的依赖"。

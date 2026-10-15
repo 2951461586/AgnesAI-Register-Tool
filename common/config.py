@@ -10,12 +10,17 @@
 1. **前缀换成 `AR_`**。三台工具可能共用同一台 CF Worker（同一个邮箱域名），
    但配置各归各的：共用前缀会让"我只改了 agnes 的配额上限"变成"顺手把
    intern 的也改了"。
-2. **只有 Worker 一个邮箱源**，没有 `IR_MAILBOX_KIND` 那套可插拔抽象。
-   那套存在的唯一理由是 OpenXLab 有**域名门**（`A0232`）；Agnes 实测
-   **没有域名门**（`@own.example` 直接过），所以不引入用不上的抽象。
-3. **没有浏览器阶段**。Agnes 的注册/登录全是 JSON API，无验证码、无 WAF 解盾
-   （实测 register/login/token 三个写接口都是裸 JSON 200），所以整条链路
-   **零浏览器**，运行依赖只有 `requests`。
+2. **邮箱源是可插拔的**（`worker` / `catchmail` / `smailr`，见 `MAIL_SOURCE_KINDS`
+   与 `src/mailbox.py`）。⚠ 本条曾写“只有 Worker 一个邮箱源”与“Agnes 没有域名门”
+   —— **两句都已过时**：平台侧**有一道域名白名单**（可用 / 被拒清单见
+   `docs/protocol.md` §2），而“多一个域名 = 多一张域名窗口”是吞吐的硬杠杆，
+   所以后来又接了 `catchmail` / `smailr` 两个源。
+3. **没有浏览器阶段** —— ⚠ **2026-10-15 16:24 起不再成立**。在那之前 Agnes 的
+   注册/登录全是裸 JSON（实测 register/login/token 三个写接口都是 200），
+   所以整条链路**零浏览器**、运行依赖只有 `requests`。**但** 16:24 起
+   ②发验证码 要求 **captcha**（`400 Captcha verification is required`）⇒
+   这一枪直接失败，而本工具没有 captcha 能力 ⇒ **链路在此断掉**。
+   实测原文与未测项见 `docs/protocol.md` §2②。
 4. **限流是"按 IP 的注册尝试窗口"**（实测，见 `REGISTER_MAX_PER_WINDOW`）。
    这是本项目加代理槽位池的**唯一理由**：窗口按出口各有一张，
    所以"有多少个不同出口"才是吞吐的乘数。
