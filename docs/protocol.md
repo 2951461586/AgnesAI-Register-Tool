@@ -61,14 +61,41 @@ HTTP 400 {"code":400,"message":"Captcha verification is required"}
 - 分类落在 **`rejected`**（服务端明确拒绝）—— **不是** `quota`、也不是 `network`。
   判据见 `src/agnes.py` 的 `_request`（4xx → `AgnesRejected`）。
 
+### 要哪种 captcha、怎么传（2026-10-15 读**前端 bundle** 查清，零窗口代价）
+
+🔴 结论：**腾讯防水墙 TCaptcha** —— **不是** Cloudflare Turnstile / hCaptcha。
+
+- 脚本：`ca.turing.captcha.qcloud.com/TCaptcha-global.js`
+  （`NEXT_PUBLIC_TENCENT_CAPTCHA_REGION="global"` ⇒ 走 global 那一支；
+  CN 支是 `turing.captcha.qcloud.com/TJCaptcha.js`）。
+- **appid `189979000`**（`new window.TencentCaptcha("189979000", cb)`）。
+- 回调给的是 **`{ret, ticket, randstr}`** 一对值。
+- 🔴 **传参方式**：发码那一枪（`/api/verification`，GET）带上 **`ticket` +
+  `randstr`** 两个参数 —— 前端原文：`x.aT({email, purpose, ticket, randstr})`。
+  **其余端点不带**（`/api/user/register` 的调用里没有它们）⇒ 这道门
+  **只装在发码上**。
+- ⚠ 本工具目前只发 `email` + `purpose` ⇒ 必被拒。这就是那条 400 的直接原因。
+
+🔴 **适配代价：需要真浏览器**（或打码平台）—— TCaptcha 是 JS widget，`ticket`
+只能由它在页面里跑出来后拿到 ⇒ **这推翻了"零浏览器"前提**。三条路：
+
+1. **真浏览器**（Playwright/Selenium）跑注册页 → 加一个重依赖 + 无头检测风险；
+2. **打码平台**（支持 TCaptcha 的）→ 花钱、依赖第三方，且**很可能违反服务条款**；
+3. 见下面那条"未测"。
+
 ⚠ **未测清**（别当结论用）：
 
 - 是**全局**要求，还是**按量 / 按时段 / 按出口子网**触发？观测到的那一批里
   **前 4 个账号成功、之后 7 个全被拦**（跨 7 个域名、7 个不同出口），但
   "那 4 个只是翻转前恰好过了"与"按量升级"从单批数据**区分不了**。
-- **其它端点是否也要**（`/api/user/register` 也拦吗？）—— **未测**。
-- 服务端要**哪种** captcha（cf-turnstile / h-captcha / 自建）、token 走**哪个**
-  字段（`cf-turnstile-response`？header？）—— **未测**。
+- **其它端点是否也要**：从**前端**看 register 不带 `ticket`/`randstr` ⇒ 大概率
+  不要，但**没实测**（要实测就得先过发码那道门）。
+- 🔴 前端里有一条**降级路径**，值得单独测一次：captcha 脚本**加载失败**时
+  前端**自己造**一对值发出去 —— `ticket="trerror_1001_189979000_<unix秒>"`、
+  `randstr="@"+随机串`（原文函数 `N()`，`errorCode:1001,
+  errorMessage:"jsload_error"`）。⇒ **服务端认不认这对假值，未测**。
+  认 ⇒ 不用浏览器也能过；不认 ⇒ 只能上真浏览器 / 打码。
+  ⚠ 用它是**主动绕过**风控，且很可能违反服务条款。
 
 🔴 **后果**：本工具**没有** captcha 能力（“零浏览器”是它的设计前提）⇒ 这一枪
 拿不到码，**整条链路在这一步断掉**。项目在 6 处把"零浏览器"当**前提**来论证

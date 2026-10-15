@@ -238,7 +238,10 @@ CI（`.github/workflows/ci.yml`）跑上面四样 + `gitleaks` 密钥扫描（**
 - 🔴 **2026-10-15 16:24 起 ②发验证码 要求 captcha** —— 服务端返回
   `400 Captcha verification is required`，而本工具**没有** captcha 能力
   （“零浏览器”是它的设计前提）⇒ **整条链路在这一步断掉**（拿不到码，后面
-  5 步都不会发生）。实测原文、复测与未测项见 `docs/protocol.md` §2②。
+  5 步都不会发生）。读前端 bundle 已查清：是**腾讯防水墙 TCaptcha**
+  （appid `189979000`），发码那一枪要带 **`ticket` + `randstr`** ⇒ 要拿到它们
+  就得跑 JS widget（**需真浏览器**或打码平台）。实测原文、复测与未测项见
+  `docs/protocol.md` §2②。
 - **限流窗口未测准** —— 默认值是保守估计，不是服务端阈值（实测下界见
   `docs/protocol.md` §3，那是唯一真源）。
 - **单出口 / 单域名吞吐有限**：两个杠杆（`AR_PROXY_SLOTS` + `AR_MAIL_DOMAINS`）
