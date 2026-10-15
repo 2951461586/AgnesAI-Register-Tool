@@ -1,13 +1,16 @@
 # Agnes AI 注册链路：协议与实测
 
 > 本文件是**现行文档**：动注册 / 登录 / 建 Key / 限流相关代码之前先读它。
-> 所有结论都来自**线上实测**（2026-10-13，单一出口 `203.0.113.10`），
-> 不是从混淆 JS 里猜的。凡是**没测到**的，都会明确写"未测"——
+> 所有结论都来自**线上实测**（2026-10-13 起，单一出口 `203.0.113.10`），
+> 不是从混淆 JS 里猜的。凡是**没测到**的，都会明确写“未测”——
 > 把猜测写成结论是这个项目最不能犯的错。
+>
+> 🔴 **2026-10-15 追加了一条推翻前提的发现**：②发验证码 开始要求 **captcha**
+> （见 §2②）。在那之前“零浏览器”成立；现在整条链路在这一步断掉。
 
 ---
 
-## 1. 全链路（6 步，零浏览器）
+## 1. 全链路（6 步）
 
 ```text
 ① 建邮箱        CF Worker  POST /api/mailboxes            → {"emails":[...]}
@@ -21,8 +24,10 @@
    Key 可用性    网关       GET  /v1/models + POST /v1/chat/completions
 ```
 
-**没有验证码图片、没有 WAF 解盾、没有浏览器**。整条链路的运行依赖只有
-`requests`（对比 Intern-Register-Tool 必须用真浏览器解阿里云验证码）。
+**2026-10-15 16:24 之前**，整条链路没有验证码图片、没有 WAF 解盾、没有浏览器，
+运行依赖只有 `requests`（对比 Intern-Register-Tool 必须用真浏览器解阿里云
+验证码）。🔴 **16:24 起 ②发验证码 要求 captcha** ⇒ 这一枪 `400`、链路在此断掉：
+实测原文、复测与**未测项**见 **§2②**。
 
 ---
 
@@ -41,10 +46,39 @@ Referer: https://platform.agnes-ai.com/
 {"code":200,"message":"ok","data":{"email":"<addr>"}}
 ```
 
-* `purpose=register` 是实测用的取值（注册流程）。
-* **不存在的域名也返回 200**（拿 `@example.com` 试过）—— 服务端不在这一步
+🔴 **2026-10-15 16:24 起：这一步开始要求 captcha**（实测原文）：
+
+```json
+HTTP 400 {"code":400,"message":"Captcha verification is required"}
+```
+
+- **首次观测** 2026-10-15 16:24:49：台账全量 209 条里只有那一批的 **7 条**命中，
+  之前**一条都没有**。**复测**（16:3x，单独打一枪、走本地闸门记账）：仍然是
+  同一条 400，**2.6s** 返回 ⇒ 不是瞬时抖动。
+- 卡在**发码**这一枪（`stages.code`），而且发生在**第一次**调用 —— 失败记录的
+  `timings` 只有 `mailbox_ms`、**没有** `code_send_ms`（那个键只在重试循环跑完
+  之后才写）⇒ 不是重试耗尽，是直接拒。
+- 分类落在 **`rejected`**（服务端明确拒绝）—— **不是** `quota`、也不是 `network`。
+  判据见 `src/agnes.py` 的 `_request`（4xx → `AgnesRejected`）。
+
+⚠ **未测清**（别当结论用）：
+
+- 是**全局**要求，还是**按量 / 按时段 / 按出口子网**触发？观测到的那一批里
+  **前 4 个账号成功、之后 7 个全被拦**（跨 7 个域名、7 个不同出口），但
+  "那 4 个只是翻转前恰好过了"与"按量升级"从单批数据**区分不了**。
+- **其它端点是否也要**（`/api/user/register` 也拦吗？）—— **未测**。
+- 服务端要**哪种** captcha（cf-turnstile / h-captcha / 自建）、token 走**哪个**
+  字段（`cf-turnstile-response`？header？）—— **未测**。
+
+🔴 **后果**：本工具**没有** captcha 能力（“零浏览器”是它的设计前提）⇒ 这一枪
+拿不到码，**整条链路在这一步断掉**。项目在 6 处把"零浏览器"当**前提**来论证
+设计（分两段的理由、依赖面只有 `requests`），**那些前提当前不成立**。
+`tests/test_doc_contract.py` 有一条守卫钉住“说了零浏览器就必须提到 captcha”。
+
+- `purpose=register` 是实测用的取值（注册流程）。
+- **不存在的域名也返回 200**（拿 `@example.com` 试过）—— 服务端不在这一步
   做域名校验，所以这一枪"成功"不代表能收到信。
-* ⚠ **"没有域名门"是错的说法**（本节曾这么写）。准确说法是：**没有"自有域名"
+- ⚠ **"没有域名门"是错的说法**（本节曾这么写）。准确说法是：**没有"自有域名"
   这道门**（`@own.example` 这类自有域名直接过，不像 OpenXLab 的 `A0232` 需要
   报备），**但平台侧有两道检查** —— 而且**返回两条不同的消息**：
 
@@ -80,7 +114,7 @@ Referer: https://platform.agnes-ai.com/
 | 路 | 结果 |
 | --- | --- |
 | **自有域名**（在 CF Worker 上加） | ✅ 唯一**可靠**的路：独占窗口、可预测。加完之后用 `probe_domains.py` 验白名单 |
-| **第三方临时邮箱服务** | ⚠️ 只有**没被列入名单**的能用。实测 `catchmail.io`（3 域名）可用；`1secmail` / `mailinator` / `dropmail` 全被拒；`outlook.com` 系（接码平台）被拒 |
+| **第三方临时邮箱服务** | ⚠️ 只有**没被列入名单**的能用。实测 `catchmail`（3 域名）与 `smailr`（4 域名）可用；`1secmail` / `mailinator` / `dropmail` 全被拒；`outlook.com` 系（接码平台）被拒 |
 
 🔴 **第三方源的关键代价**：它的域名是**公共**的 —— 任何人都能在上面建地址
 ⇒ 那个域名的服务端窗口**与陌生人共享**，可能被别人的量打满且**不可控**。
@@ -88,7 +122,8 @@ Referer: https://platform.agnes-ai.com/
 （同类项目就记过 `Mail.tm` 的公共域名 `uberip.com`"周期性被封"。）
 
 ⇒ 本项目因此支持**多源**（`AR_MAIL_SOURCES`，默认只有 `worker`）：
-自有域名当主力，`catchmail` 当溢出容量。详见 `src/mailbox.py`。
+自有域名当主力，`catchmail` / `smailr` 当溢出容量（`smailr` 给 4 个域名，
+是三个源里最值的一个）。详见 `src/mailbox.py`。
 
 ⚠ **未测清**：**子域是不是独立窗口**。间接证据是"`own.example` 与
 `sub.own.example` 同时成功"—— 若服务端把它们算**同一个域名**，则合计 4 次
@@ -156,9 +191,9 @@ Authorization: Bearer <JWT>
   "key_preview":"sk-XXXXXX…XXXXXX","key":"sk-<48 chars，明文，只在创建时返回一次>"}}
 ```
 
-* `data.key` 是**明文 key，只在创建时返回一次**（列表接口只给 `key_preview`）。
+- `data.key` 是**明文 key，只在创建时返回一次**（列表接口只给 `key_preview`）。
   台账丢了 = key 丢了。
-* `GET /api/token`（列表）还带配额：
+- `GET /api/token`（列表）还带配额：
   `default_quota:{max_keys:20,current:1,keys_remaining:19}`。
 
 ### 只读校验
@@ -190,14 +225,16 @@ POST https://apihub.agnes-ai.com/v1/chat/completions {"model":"agnes-2.5-flash",
 
 ### 已实测（结论确定）
 
-- **注册尝试限流是"按 IP"的**，消息固定为：
-```text
-   HTTP 400 {"code":400,"message":"Too many registration attempts from this IP.
-             Please try again later"}
-   ```
-   🔴 它是 **400，不是 429** —— 只看状态码必然漏判。判据见
-   `src/agnes.py:_is_ip_limited`（要求出现 `too many registration attempts`
-   这个具体短语）。
+- **注册尝试限流是“按 IP”的**，消息固定为：
+
+  ```text
+  HTTP 400 {"code":400,"message":"Too many registration attempts from this IP.
+            Please try again later"}
+  ```
+
+  🔴 它是 **400，不是 429** —— 只看状态码必然漏判。判据见
+  `src/agnes.py:_is_ip_limited`（要求出现 `too many registration attempts`
+  这个具体短语）。
 
 - **两个端点共用同一张计数**：`/api/verification` 与 `/api/user/register`
    在被限流时返回**同一条消息**。
@@ -207,7 +244,7 @@ POST https://apihub.agnes-ai.com/v1/chat/completions {"model":"agnes-2.5-flash",
   想跑 N 个账号，两个维度的上限都要 ≥ `2N`。
 
 - **域名维度在注册时换不动** —— 域名已经写死在邮箱地址里。所以本地闸门
-  （`src/pipeline.py`）必须**一次占够 `REQUESTS_PER_ACCOUNT` 格才发码**：
+  （`src/pipeline/limiter.py`）必须**一次占够 `REQUESTS_PER_ACCOUNT` 格才发码**：
   "只留 1 格就发码"= 码烧了、注册进不去。
 
   ⚠ 实测（2026-10-14，5 账号跑批）：**3/5** 是这个形态 ——
@@ -257,16 +294,17 @@ POST https://apihub.agnes-ai.com/v1/chat/completions {"model":"agnes-2.5-flash",
 
 ### 未测（**不要当结论用**）
 
-* **窗口长度**：只知道 **>45 分钟**。可能是 1 小时 / 按天。
+- **窗口长度**：只知道 **>45 分钟**。可能是 1 小时 / 按天。
   这也是 `.env` 里 `AR_REGISTER_WINDOW_S` 默认取保守值（**3600s**）的原因。
 
 > 🔴 **窗口长度这条事实的唯一真源就是本节。** `common/config.py` 与
 > `README.md` 只**引用**它、不另写数字 —— 同一份知识写两处必然漂移
 > （本项目实际漂移过：一处 `>4 分钟`、一处 `>45 分钟`、一处默认 `600s`）。
-* **阈值 N**：不知道是"N 次/窗口"还是令牌桶（我们的探测本身可能**续命**窗口，
+
+- **阈值 N**：不知道是“N 次/窗口”还是令牌桶（我们的探测本身可能**续命**窗口，
   所以"探测期间一直 400"不能反推窗口长度）。
-* **是否按 IP+UA / IP+指纹**：只用过一个 UA，没做对照实验。
-* **成功注册是否也占用额外计数**：观测到"2 次发码 + 1 次成功注册"之后就被拦，
+- **是否按 IP+UA / IP+指纹**：只用过一个 UA，没做对照实验。
+- **成功注册是否也占用额外计数**：观测到"2 次发码 + 1 次成功注册"之后就被拦，
   但也可能是那之前的其它请求累积的。
 
 **要测准它**：用 `tools/probes/probe_register_limit.py`，并且
@@ -365,8 +403,8 @@ SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] ...')
 
 ⚠ 这里也差点归错：`SSLError` 望文生义会当成"TLS 握手失败（请求没出去）"，
 而实测原文是 `SSLEOFError`。**看异常原文，别看类名。**
-⇒ 两者都**不能**当作"可以安全重试"的依据（重试可能变成第二封验证码
-+ 第二格服务端窗口）。
+⇒ 两者都**不能**当作“可以安全重试”的依据（重试可能变成第二封验证码 +
+第二格服务端窗口）。
 
 ⛔ 这两种形态归 `network`（可重试的那一类），**不要**归成 `rejected`
 （确定性拒绝，修法是改输入）或 `quota`（限流，修法是换出口 / 等窗口）——
@@ -384,17 +422,17 @@ SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] ...')
 
 ## 5. 邮箱侧：CF Worker 的实测与坑
 
-* **收信一律走 `/api/inbox?email=`**，不要用 `/admin/all`：
+- **收信一律走 `/api/inbox?email=`**，不要用 `/admin/all`：
   后者不支持按收件人过滤（每次读 N+1 行，烧 D1 读配额），而且返回的是
   "最新 N 条"——D1 retention 只有 100 行，这张表被别的项目灌满时，
   我们的邮件会被**挤出窗口，永远读不到**。按收件人索引查则挤不掉。
-* **5xx 必须重试而不是判死**：Worker 会间歇性抛 Cloudflare `Error 1101`，
+- **5xx 必须重试而不是判死**：Worker 会间歇性抛 Cloudflare `Error 1101`，
   而那时邮件好好躺在库里。轮询本来就是在等，多等几次的代价远小于丢掉一个
   **已经注册成功**的账号。4xx（401 凭据错 / 404）才是我们的问题。
-* **`since_ts` 必须传**（毫秒）：补跑 / 重试时收件箱里可能还躺着上一轮的
+- **`since_ts` 必须传**（毫秒）：补跑 / 重试时收件箱里可能还躺着上一轮的
   验证码，不设下限就会拿到一个**已经用过**的码，然后服务端报"验证码错误"，
   而真正的原因是我们在用旧信。
-* `received_at` 是**毫秒**（`1791856228371`），与 `receivedDateTime` 的 ISO 串
+- `received_at` 是**毫秒**（`1791856228371`），与 `receivedDateTime` 的 ISO 串
   同一时刻。把秒当毫秒传进 `since_ts`，过滤会**全部失效**。
 
 ---

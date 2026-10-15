@@ -4,13 +4,17 @@ Agnes AI（国际站）的**端到端注册全链路**：CF Worker 域名邮箱 
 注册 → 密码登录 → 建 API Key → **推理网关实测 key 可用**。批量可跑，
 带台账、按出口的限流闸门、代理槽位池与收尾报告。
 
+> 🔴 **2026-10-15 16:24 起本工具跑不通**：②发验证码 这一步服务端开始要求
+> **captcha**（`400 Captcha verification is required`），而本工具没有 captcha
+> 能力。原文、复测与未测项见 [`docs/protocol.md`](docs/protocol.md) §2②。
+
 ```bash
 cp .env.example .env      # 填 AR_WORKER_* 三项（见下）
 python run.py             # 跑 1 个账号
 python run.py --count 6   # 跑 6 个
 ```
 
-**零浏览器**：整条链路是标准 JSON API，没有验证码图片、没有 WAF 解盾，
+在此之前整条链路是标准 JSON API、**零浏览器**：没有验证码图片、没有 WAF 解盾，
 运行依赖只有 `requests` 一个（对比 [Intern-Register-Tool] 必须用真浏览器
 解阿里云验证码）。协议与实测证据在 [`docs/protocol.md`](docs/protocol.md)。
 
@@ -51,7 +55,8 @@ python run.py --count 4 --preflight    # 跑批前先体检出口链路（不耗
 | `AR_WORKER_BASE` | ✅ | CF Worker 地址，如 `https://<worker>.<sub>.workers.dev` |
 | `AR_WORKER_ADMIN_TOKEN` | ✅ | Worker 的 Admin Token |
 | `AR_WORKER_DOMAIN` | ✅ | 收信域名（实测**自有域名不需要报备**，但平台侧有**域名白名单** —— 见 `docs/protocol.md` §2） |
-| `AR_MAIL_DOMAINS` | — | 收信**域名池**（逗号分隔，轮换用）。留空退回 `AR_WORKER_DOMAIN`。**第二个吞吐杠杆**（见下） |
+| `AR_MAIL_SOURCES` | — | 启用的邮箱源（`worker` / `catchmail` / `smailr`，默认只有 `worker`）。**域名数才是吞吐硬上限** ⇒ 多一个源 = 多几张域名窗口 |
+| `AR_MAIL_DOMAINS` | — | `worker` 源的收信**域名池**（逗号分隔，轮换用）。留空退回 `AR_WORKER_DOMAIN`。另两个源各有自己的域名（`AR_CATCHMAIL_DOMAINS` / `AR_SMAILR_DOMAINS`）。**第二个吞吐杠杆**（见下） |
 | `AR_PASSWORD_LEN` | — | 默认 16。服务端硬要求 ≥ 8 |
 | `AR_KEY_NAME` | — | 创建的 API Key 名称，默认 `auto` |
 | `AR_VERIFY_MODEL` / `AR_VERIFY_CHAT` | — | key 校验用的模型 / 是否真打一次 chat |
@@ -79,15 +84,15 @@ Agnes 对**注册尝试**（`/api/verification` 与 `/api/user/register`，**共
 
 🔴 它们是 **400，不是 429**。所以：
 
-* 🔴 **窗口计的是「请求」，而一个账号要打两枪**（发码 + 注册共用同一张计数）
+- 🔴 **窗口计的是「请求」，而一个账号要打两枪**（发码 + 注册共用同一张计数）
   ⇒ 默认的 `2` 实际只放行 **1 个账号 / 窗口**，不是 2 个。想跑 N 个账号，
   两个维度的上限都要 ≥ `2N`。这一点曾被读成"2 个账号"，直接导致"码烧了、
   注册进不去"（见下面第 4 点）；
-* **只调大 `--producers` 不会提高吞吐** —— 那是同一张窗口里的名额；
-* 提高吞吐要**两个杠杆一起上**：`AR_PROXY_SLOTS`（N 个出口 = N 张 IP 窗口）
+- **只调大 `--producers` 不会提高吞吐** —— 那是同一张窗口里的名额；
+- 提高吞吐要**两个杠杆一起上**：`AR_PROXY_SLOTS`（N 个出口 = N 张 IP 窗口）
   **和** `AR_MAIL_DOMAINS`（M 个域名 = M 张域名窗口）。只加一个，会立刻撞上
   另一个维度的窗口；
-* 撞到限流时本工具**先换维度**（IP 撞了就换出口、域名撞了就换域名），
+- 撞到限流时本工具**先换维度**（IP 撞了就换出口、域名撞了就换域名），
   换不动才退避重试。
 
 ⚠ **窗口长度尚未测准** —— 这条事实的唯一真源是
@@ -97,8 +102,9 @@ Agnes 对**注册尝试**（`/api/verification` 与 `/api/user/register`，**共
 （默认 `2 次 / 3600s`，= 1 个账号）。测准它的方法见
 `tools/probes/probe_register_limit.py`。
 
-🔴 **域名维度换不动，所以本地必须一次占够两枪**（`src/pipeline.py` 的
-`REQUESTS_PER_ACCOUNT`）。注册时域名已经定死在邮箱里 —— 只留一格就发码，
+🔴 **域名维度换不动，所以本地必须一次占够两枪**（`REQUESTS_PER_ACCOUNT`，
+真源在 `common/config.py`、由 `src/pipeline/limiter.py` 转出）。注册时域名已经
+定死在邮箱里 —— 只留一格就发码，
 等于"码烧了、注册却进不去"。所以 `provision` 会先确认域名窗口装得下
 **两枪**，装不下就**一枪都不发**（`skipped`），而不是先烧了再说。
 实测依据：一次 5 账号跑批里 3 个就是这个形态（两个域名各 2/2 打满）。
@@ -108,9 +114,9 @@ Agnes 对**注册尝试**（`/api/verification` 与 `/api/user/register`，**共
 邮箱是临时邮箱（收不到找回信），密码与 `sk-` key **只存在于台账里**，
 而 `data.key` 只在创建时返回一次。所以：
 
-* `ledger/` 整个目录在 `.gitignore` 中；
-* **不要**把它当临时文件清掉 —— 定期另存一份到别处；
-* 每次跑批按 email **合并**（不是覆盖），并有**防静默缩水护栏**：
+- `ledger/` 整个目录在 `.gitignore` 中；
+- **不要**把它当临时文件清掉 —— 定期另存一份到别处；
+- 每次跑批按 email **合并**（不是覆盖），并有**防静默缩水护栏**：
   若一次小规模运行会让台账条数变少，它**拒绝写盘**并退出码 3。
 
 ### 3. `verify` 阶段才证明 key 真能用
@@ -134,9 +140,15 @@ ledger/latest.json                          ← **本批结果**（含失败 / �
 🔴 读源是**最新的全量快照**，**不是** `latest.json`（后者只含本批，拿它当读源
 会让台账停止累积）。详见 [`src/ledger.py`](src/ledger.py) 的模块 docstring。
 
-每条记录包含：`email` / `password` / `user_id` / `user_uuid` / `jwt` /
-`api_key` / `key_id` / `key_preview` / `plan` / `balance_minor` / `key_max` /
-`models_count` / `status` / `error_kind` / `stages` / `timings` / `proxy`。
+🔴 **字段的完整清单 = `src/pipeline/record.py` 的 `AccountRecord.as_dict()`**，
+这里只列几个关键的 —— **别在这里维护全量列表**（它漂移过：一度漏了 9 个字段，
+包括 `mail_domain` / `mail_reused` / `mailboxes_created` / `proxy_rotated`）：
+
+`email` / `password` / `jwt` / `api_key` / `status` / `error_kind` /
+`stages` / `timings` / `mail_domain` / `mailboxes_created` / `proxy`。
+
+⚠ `mailboxes_created` = 本账号**新建过的所有收信地址**（换域名会重建邮箱 ⇒
+可能多个）；`cleanup_settled` 按它逐个删 smailr 邮箱。**复用的不在里面**。
 
 `status` 有三态：`success` / `failed` / `skipped`（**跳过 = 一个请求都没发**，
 与"试过了不行"是两件事）。
@@ -222,15 +234,22 @@ CI（`.github/workflows/ci.yml`）跑上面四样 + `gitleaks` 密钥扫描（**
 
 ## 已知限制
 
-* **限流窗口未测准** —— 默认值是保守估计，不是服务端阈值（实测下界见
+- 🔴 **2026-10-15 16:24 起 ②发验证码 要求 captcha** —— 服务端返回
+  `400 Captcha verification is required`，而本工具**没有** captcha 能力
+  （“零浏览器”是它的设计前提）⇒ **整条链路在这一步断掉**（拿不到码，后面
+  5 步都不会发生）。实测原文、复测与未测项见 `docs/protocol.md` §2②。
+- **限流窗口未测准** —— 默认值是保守估计，不是服务端阈值（实测下界见
   `docs/protocol.md` §3，那是唯一真源）。
-* **单出口 / 单域名吞吐有限**：两个杠杆（`AR_PROXY_SLOTS` + `AR_MAIL_DOMAINS`）
+- **单出口 / 单域名吞吐有限**：两个杠杆（`AR_PROXY_SLOTS` + `AR_MAIL_DOMAINS`）
   不一起配时，批量会被同一张 IP 或域名窗口卡住。
-* **邮箱源只有 CF Worker 一个** —— 自有域名不需要报备（没有 OpenXLab 那种
-  `A0232` 域名门），但**平台侧有一道域名白名单**（可用/被拒的清单见
-  `docs/protocol.md` §2）；要换源得改 `src/tempmail.py`。
-* **不处理找回密码 / 二次验证** —— 临时邮箱收不到找回信，台账丢了就是丢了。
-* 本工具仅供学习与自用；请遵守 Agnes 的服务条款。
+- **可用域名受 Agnes 侧白名单限制** —— 邮箱源有**三个**（自有 CF Worker 域名 /
+  `catchmail` / `smailr`，按域名派发见 `src/mailbox.py` 的 `MailboxSource` 契约），
+  自有域名不需要报备（没有 OpenXLab 那种 `A0232` 域名门），但**平台侧有一道域名
+  白名单**（可用 / 被拒清单见 `docs/protocol.md` §2）。第三方临时邮箱域名大多被拒
+  ⇒ **实际可用的域名数才是吞吐硬上限**。新增源 = 实现 `src/mailbox.py` 的
+  `MailboxSource` 契约 + 在 `common/config.py` 登记它的域名。
+- **不处理找回密码 / 二次验证** —— 临时邮箱收不到找回信，台账丢了就是丢了。
+- 本工具仅供学习与自用；请遵守 Agnes 的服务条款。
 
 [Intern-Register-Tool]: ../Intern-Register-Tool
 [Hark-Register-Tool]: ../Hark-Register-Tool

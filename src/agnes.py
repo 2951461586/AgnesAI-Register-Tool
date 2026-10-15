@@ -7,6 +7,11 @@
 
 链路（6 步，全程纯 HTTP，**零浏览器**）
 --------------------------------------
+🔴 **2026-10-15 16:24 起 ② 这一枪要求 captcha**（`400 Captcha verification
+   is required`）⇒ `send_code()` 抛 `AgnesRejected`。本工具**没有** captcha
+   能力（零浏览器是它的设计前提）⇒ 链路在此断掉。实测原文与未测项见
+   `docs/protocol.md` §2②。
+
     ① 建邮箱（CF Worker，见 `tempmail.py`）
     ② GET  {platform}/api/verification?email=&purpose=register
          → {"code":200,"message":"ok","data":{"email":...}}   ← 发验证码
@@ -309,6 +314,11 @@ class AgnesClient:
         ⚠ 这是**写**请求：它消耗服务端那张按 IP 的注册尝试窗口
           （见 `MSG_IP_RATE_LIMITED`），所以调用前必须过本地闸门
           （`pipeline.register_limiter(slot)`）。
+
+        🔴 **2026-10-15 16:24 起服务端在这一枪要求 captcha**：返回
+          `400 {"code":400,"message":"Captcha verification is required"}`
+          ⇒ 抛 `AgnesRejected`（`kind="rejected"`）。本工具没有 captcha 能力，
+          链路在此断掉。见 `docs/protocol.md` §2②。
         """
         r = self._request(
             "GET",

@@ -23,9 +23,11 @@
     且**不要**把它当临时文件清掉 —— 定期把 `ledger/` 另存一份到别处。
 
 关于 --workers / --producers：
-  **本项目零浏览器**（整条链路纯 HTTP，无验证码 / 无 WAF 解盾），
-  所以并发只受两件事约束：邮箱 Worker（建地址 + 收信轮询）和
-  **Agnes 按 IP 的注册尝试限流**（`/api/verification` + `/api/user/register`）。
+  **本项目零浏览器**（整条链路纯 HTTP）—— ⚠ 但 **2026-10-15 16:24 起 ②发验证码
+  要求 captcha**（`400 Captcha verification is required`），那一枪会直接失败，
+  链路在此断掉（见 `docs/protocol.md` §2②）。在此之前，并发只受两件事约束：
+  邮箱 Worker（建地址 + 收信轮询）和 **Agnes 按 IP 的注册尝试限流**
+  （`/api/verification` + `/api/user/register`）。
 
       --producers  同时在"建邮箱 → 发验证码 → 等码"的账号数。
                    **等码是整链最大单项**（1~3s），所以这个数直接决定吞吐。
