@@ -396,3 +396,31 @@ def test_markdownlint_config_exists_because_docs_claim_it():
     assert '"dash"' in text, "项目符号标准必须是 dash（见配置里的理由注释）"
     # 声称“不卡行宽”就得真的关掉 MD013 —— 否则标准与文档说的不是一回事
     assert re.search(r'"MD013"\s*:\s*false', text), "docs 说“不卡行宽”，但配置里没关 MD013"
+
+
+# ── CI 的依赖口径 ──────────────────────────────────────────────
+def test_pyright_job_installs_pytest():
+    """🔴 守卫：CI 的 pyright job 必须装**它 include 到的代码所需**的依赖。
+
+    实测事故（2026-10-15，本仓库**首次**跑 CI）：pyright job 只装了运行依赖
+    （`requests`），而 `pyproject.toml` 的 `[tool.pyright] include` 覆盖 `tests/`
+    —— 用例 `import pytest` ⇒ pyright 报 **13 个** `reportMissingImports`、job 红。
+
+    🔴 **本地测不出来**：本机装了 pytest，所以 `npx pyright` 是 0 error。
+    这是典型的“本地绿、CI 红”—— 只有把依赖口径钉住才不会再犯。
+    （与 `test_ci_claim_implies_ci_config_exists` 同一族：都是“说了有 X / 配了 X
+    就必须真的成立”。）
+    """
+    wf = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    m = re.search(r"\n  typecheck:\n(.*?)(?=\n  [a-z-]+:\n|\Z)", wf, re.S)
+    assert m, "ci.yml 里找不到 `typecheck:` job —— 本用例的前提变了，请重看那个文件"
+    job = m.group(1)
+    assert "pyright" in job, f"`typecheck:` job 里没跑 pyright？\n{job[:200]}"
+    # 🔴 只认**安装行**（`pip install ... pytest`）—— 不能只查 `"pytest" in job`：
+    #    那个 job 的**注释**里也会提到 pytest，于是断言恒真、守卫形同不存在
+    #    （本用例第一版就是这个形态，反向验证时拓到了）。
+    assert re.search(r"pip install[^\n]*pytest", job), (
+        "CI 的 pyright job 没装 pytest，而它 include 了 `tests/`（用例 `import pytest`）\n"
+        "  ⇒ CI 报 reportMissingImports，而**本地是绿的**（本机装了 pytest）。\n"
+        '  修法：在那个 job 的安装步骤里加上 `pip install "pytest>=8"`。'
+    )

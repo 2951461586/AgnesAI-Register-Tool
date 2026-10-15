@@ -92,9 +92,19 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: 安装运行依赖
-        # pyright 要能解析 `import requests` —— 不装就会报 reportMissingImports。
-        run: pip install -r requirements.txt
+      - name: 安装运行依赖 + pytest
+        # 🔴 pyright 要能解析它 `include` 到的**所有**代码的 import：
+        #    · `import requests`（运行依赖）
+        #    · `import pytest`（`tests/` 里的用例 —— 而 `pyproject.toml` 的
+        #      `[tool.pyright] include` 覆盖 `tests/`）
+        #    ⚠ **实测事故（2026-10-15，本仓库首次跑 CI）**：这一行原本只装了
+        #      `requests` ⇒ pyright 报 13 个 `reportMissingImports`、job 红。
+        #      而**本地**永远是绿的（本机装了 pytest）⇒ 典型的“本地绿、CI 红”，
+        #      只有把依赖口径钉住才不会再犯（守卫：
+        #      `tests/test_doc_contract.py::test_pyright_job_installs_pytest`）。
+        run: |
+          pip install -r requirements.txt
+          pip install "pytest>=8"
 
       - name: pyright（类型检查）
         # 🔴 锁版本：与 ruff 锁次版本同一个理由 —— 上游发新版新增规则会让 CI
