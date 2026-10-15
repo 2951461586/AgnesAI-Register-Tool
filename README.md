@@ -193,6 +193,7 @@ python tools/probes/probe_register_limit.py  # 注册尝试限流的边界（⚠
 python tools/probes/probe_slots.py           # 出口池：IP 是否两两不同 / Agnes 是否可达
 python tools/ops/verify_accounts.py          # 台账账号存活复核（只读）
 python tools/data/export_keys.py             # 导出 sk- key 列表
+python tools/data/export_success.py          # 汇总成功账号 → `ledger/success/`（明文凭据，已 gitignore）
 ```
 
 ---
