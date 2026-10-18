@@ -13,8 +13,10 @@ from __future__ import annotations
 import math
 import random
 
-import numpy as np
-from PIL import Image, ImageDraw
+# 🔴 这两个是**可选依赖**（`.[captcha]` extra）。CI 只装运行依赖 ⇒ pyright
+#    在这个文件上必须显式忽略 missing import（与 `src/captcha_solver.py` 同一条约定）。
+import numpy as np  # pyright: ignore[reportMissingImports]
+from PIL import Image, ImageDraw  # pyright: ignore[reportMissingImports]
 
 W, H = 672, 480
 SPRITE_W, SPRITE_H = 720, 240

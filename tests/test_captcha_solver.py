@@ -57,7 +57,8 @@ def test_corr_valid_matches_fftconvolve():
 
     对齐错一个像素就会让所有峰值漂移；这里用两个奇偶不同的模板形状覆盖。
     """
-    from scipy.signal import fftconvolve
+    # 可选依赖：CI 不装 `.[captcha]` ⇒ 显式忽略（本地有依赖时照样能跑）。
+    from scipy.signal import fftconvolve  # pyright: ignore[reportMissingImports]
 
     rng = np.random.default_rng(0)
     cand = rng.random((90, 110)) > 0.9
