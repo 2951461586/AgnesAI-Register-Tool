@@ -45,7 +45,11 @@ def test_label_never_leaks_password_in_host_port_user_pass_form():
     """🔴 回归：`host:port:user:pass` 的**末段是密码**。
 
     旧实现 `url.rsplit(":", 1)[-1]` 会把密码当标签打进报告 —— 实测 10 个
-    槽位全部把代理密码原样打了出来（`t0psecret` 那一列）。
+    槽位全部把代理密码原样打了出来（代理密码那一列）。
+
+    🔴 这段说明曾经直接写出**真实代理密码**，而本仓库是公开的
+      ⇒ 远端 HEAD 可读。凭据类“实测记录”一律只用占位描述，
+      不要把值抄进注释/文档（与 `docs/security-conventions.md` §3 同一条）。
     """
     st = SlotStats(url="us.proxy.example:2000:acct-region-SG-sid-abc:t0psecret")
     label = st.label
