@@ -56,6 +56,7 @@ def run_batch(
     mail_factory=None,
     client_factory=None,
     slot_pool=None,
+    captcha_provider=None,
     log=_print,
 ) -> list[AccountRecord]:
     """跑 `count` 个账号。返回**本批**记录（含失败 / 跳过，顺序=完成顺序）。
@@ -67,11 +68,18 @@ def run_batch(
         └────────────────────────────────────────┘ 队列 └─────────────────────────┘
                                                    末尾：并行校验所有 Key
 
-    `mail_factory` / `client_factory` 是**注入点**：默认造真的客户端，
-    测试传假的 —— 这样编排、打标、配额逻辑都能**离线**测（零网络请求）。
+    `mail_factory` / `client_factory` / `captcha_provider` 是**注入点**：
+    默认造真的客户端，测试传假的 —— 这样编排、打标、配额逻辑都能**离线**测
+    （零网络请求）。`captcha_provider=None` 且 `config.CAPTCHA_ENABLED` 时
+    会造默认的 headless Playwright provider。
     """
     mail_factory = mail_factory or (lambda domain=None: _mailbox.for_domain(domain))
     client_factory = client_factory or (lambda proxy=None: AgnesClient(proxy=proxy))
+    if captcha_provider is None and config.CAPTCHA_ENABLED:
+        # 延迟 import：不让 captcha 的可选依赖污染 `run_batch` 的 import 面。
+        from ..captcha import default_provider
+
+        captcha_provider = default_provider()
     # 槽位池：**由调用方拥有**（`run.py` 建它、传进来、跑完读它的统计）。
     # 不在这里建的原因：返回值是 `list[AccountRecord]`，没法把统计挂在上面
     # （`list` 不能设属性），而用模块全局会在同进程跑多批时被后一批覆盖。
@@ -147,6 +155,7 @@ def run_batch(
                 mail_domain=mail_domain,
                 slot_pool=slot_pool,
                 client_factory=client_factory,
+                captcha=captcha_provider,
             )
         except (_quota.QuotaExceeded, WindowBusy) as ex:  # 注入的假客户端也可能抛
             # 本地守卫主动中止（爆炸半径上限 / 滑动窗口等不起）⇒ **一个请求都

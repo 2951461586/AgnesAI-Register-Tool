@@ -5,12 +5,13 @@
 **全部来自实测**（2026-10-13，逐条线上验证 + 前端 bundle 的路径枚举），
 不是从混淆 JS 里猜的。完整证据链见 `docs/protocol.md`。
 
-链路（6 步，全程纯 HTTP，**零浏览器**）
---------------------------------------
+链路（6 步；② 发码由 headless captcha provider 前置）
+----------------------------------------------------
 🔴 **2026-10-15 16:24 起 ② 这一枪要求 captcha**（`400 Captcha verification
-   is required`）⇒ `send_code()` 抛 `AgnesRejected`。本工具**没有** captcha
-   能力（零浏览器是它的设计前提）⇒ 链路在此断掉。实测原文与未测项见
-   `docs/protocol.md` §2②。
+   is required`）⇒ 没带 `ticket`/`randstr` 时 `send_code()` 会抛
+   `AgnesRejected`。主流水线默认用 `src/captcha.py` 的 **headless** provider
+   先解出这两个值（`AR_CAPTCHA_ENABLED` 默认开）；本模块只负责把它们拼进
+   query。实测与未测项见 `docs/protocol.md` §2②。
 
     ① 建邮箱（CF Worker，见 `tempmail.py`）
     ② GET  {platform}/api/verification?email=&purpose=register
@@ -64,6 +65,9 @@ ERR_REJECTED = "rejected"
 ERR_NETWORK = "network"
 ERR_MAIL = "mail"
 ERR_VERIFY = "verify"
+# captcha 求解失败（本地）。与 `rejected` 分开：`rejected` 是**服务端明确拒绝**，
+# 而这一类是“我们没拿到 ticket/randstr”（依赖缺失 / 浏览器超时 / 答案被拒）。
+ERR_CAPTCHA = "captcha"
 
 # 实测的服务端业务码 / 文案。
 # 🔴 限流是 **HTTP 400 + 这句话**，不是 429 —— 这是本项目最容易漏的一处。
@@ -109,6 +113,17 @@ class AgnesNetwork(AgnesError):
     """网络 / 超时 / 5xx —— **可重试**的一类。"""
 
     kind = ERR_NETWORK
+
+
+class AgnesCaptcha(AgnesError):
+    """captcha 求解失败（本地）：依赖缺失 / 浏览器超时 / 答案被拒。
+
+    🔴 它**不是** `rejected`：`rejected` 是服务端对着已经带 ticket 的请求
+       明确拒绝；而这一类是**根本没拿到** ticket/randstr。两者的修法不同：
+       前者改输入，后者查 captcha provider / 依赖 / 窗口。
+    """
+
+    kind = ERR_CAPTCHA
 
 
 def _json_or_none(r):
@@ -308,22 +323,34 @@ class AgnesClient:
         return r
 
     # ── ② 发验证码 ────────────────────────────────────────────
-    def send_code(self, email: str, purpose: str = "register") -> dict:
+    def send_code(
+        self,
+        email: str,
+        purpose: str = "register",
+        *,
+        ticket: str | None = None,
+        randstr: str | None = None,
+    ) -> dict:
         """请求服务端发验证码。
 
         ⚠ 这是**写**请求：它消耗服务端那张按 IP 的注册尝试窗口
           （见 `MSG_IP_RATE_LIMITED`），所以调用前必须过本地闸门
           （`pipeline.register_limiter(slot)`）。
 
-        🔴 **2026-10-15 16:24 起服务端在这一枪要求 captcha**：返回
-          `400 {"code":400,"message":"Captcha verification is required"}`
-          ⇒ 抛 `AgnesRejected`（`kind="rejected"`）。本工具没有 captcha 能力，
-          链路在此断掉。见 `docs/protocol.md` §2②。
+        🔴 2026-10-15 16:24 起服务端要求 captcha：没带 `ticket`/`randstr` 会返回
+          `400 {"code":400,"message":"Captcha verification is required"}`。
+          这两个值由 `src/captcha.py` 的 provider 在**真浏览器**里解出来；
+          本方法只负责把它们拼进 query（其余端点不带）。
         """
+        params = {"email": email, "purpose": purpose}
+        if ticket:
+            params["ticket"] = ticket
+        if randstr:
+            params["randstr"] = randstr
         r = self._request(
             "GET",
             "/api/verification",
-            params={"email": email, "purpose": purpose},
+            params=params,
             headers={"x-user-language": "zh-CN"},
         )
         return _json_or_none(r) or {}

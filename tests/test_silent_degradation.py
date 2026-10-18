@@ -72,6 +72,17 @@ def _fn_name(node, parents):
 
 # (相对路径, 函数名) —— 这些循环的"耗尽"本身就是设计好的正常出口。
 LOOP_ALLOWED = {
+    ("src/captcha_solver.py", "_ncc_peaks"): (
+        "两个循环都是**笛卡尔积扫描**（scale × angle，之后收集局部极大值）："
+        "`continue` 是“这个尺度/角度超出图尺寸，跳过”，耗尽 = “这个网格里没峰” ——"
+        "返回 `[]` 是它的正常出口，调用方（`solve_arrays`）会把空峰当低分处理。"
+        "这不是重试循环，不存在“耗尽后静默降级”的形态。"
+    ),
+    ("src/captcha.py", "_find_captcha_frame"): (
+        "遍历 `page.frames` 找 captcha iframe。`continue` 是**跳过 detach 的 frame**，"
+        "耗尽 = 没找到目标 frame，`None` 就是它的正常出口之一；调用方拿到 `None` 会"
+        "抛 `AgnesCaptcha`（不是静默降级）。"
+    ),
     ("src/tempmail.py", "wait_for_mail"): (
         "轮询循环：`while time.time() < deadline` 耗尽 = **等超时**，这正是设计"
         "结果（返回值 `None` 就是它的正常出口之一）。循环后那段不是降级，而是"
@@ -95,6 +106,13 @@ LOOP_ALLOWED = {
         "三个源给出不同语义会让那个分流变成碰运气。\n"
         "     `while time.time() < deadline` 耗尽 = **等超时**，`None` 就是它的正常"
         "出口之一；循环后那段是**分类**而不是降级。"
+    ),
+    ("tools/probes/probe_window_limits.py", "pick_slot"): (
+        "两轮都是**偏好排序**，不是重试：第一轮只挑本地窗口看起来空的出口，"
+        "耗尽 ⇒ 落到第二轮（任意未用过的出口）；第二轮耗尽 ⇒ 返回 `None`，"
+        "调用方会返回 `no-slot` 并明确报出来。"
+        "`continue` 是“跳过不满足条件的候选”，不是“消耗一次尝试后等下一次” ——"
+        "与 `provision` / `finish` 那两个静默降级形态不同。"
     ),
 }
 
@@ -187,6 +205,22 @@ def test_loop_allowlist_entries_are_not_stale():
 
 # (相对路径, 函数名, 异常类型名) —— 这里的"吞掉"是**有意**的。
 EXCEPT_ALLOWED = {
+    ("src/captcha.py", "_find_captcha_frame", "Exception"): (
+        "遍历 `page.frames` 找 captcha iframe；某个 frame 在遍历途中被 detach 会让 "
+        "`locator().count()` 抛 —— 跳过它继续找下一个是安全的（我们只是在找目标 "
+        "frame，不是吞业务错误）。找不到会由调用方抛 `AgnesCaptcha`。"
+    ),
+    ("src/captcha.py", "_solve_once", "Exception"): (
+        "注册 tab 的点击是**重试循环**：页面还在加载时 `get_by_text().click()` 会抛 "
+        "timeout / detached，吞掉后由下一轮重试；4 轮都失败会走 `else` 抛 "
+        "`AgnesCaptcha`。这里吞的是**定位/时序**错误，不是业务拒绝。"
+    ),
+    ("tools/ops/analyze_window_recovery.py", "_at", "(TypeError, ValueError)"): (
+        '台账里的 `timings` 是**别人写的 JSON**：某个字段变成 `"12s"` / `null` 时，'
+        "`int()` 会抛。这里只做**时间线近似**（判 15min 还是 60min 的量级），"
+        "坏字段按 0 算 —— 让一个脏字段炸掉整份分析，比少算一个偏移更糟。"
+        "⚠ 这是**离线分析器**，不是流水线：它不产生 `error_kind`，也没有 `rec` 可写。"
+    ),
     ("src/jsonlstore.py", "read", "ValueError"): (
         "半截 JSONL 行（写盘时被杀 / 被人手改）只丢**这一行**，不丢整个文件。"
         "**状态文件是加速器不是数据**：丢一行的后果是闸门**偏松**（下一轮可能"

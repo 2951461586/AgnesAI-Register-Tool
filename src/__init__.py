@@ -18,6 +18,8 @@
     windowstore.py 滑动窗口事件存储（**跨进程持久化**，与服务端两道窗口同构）
     report.py     批量收尾报告（纯展示，依赖注入，不 import 上层）
     preflight.py  跑批前的链路健康预检（只读，不耗注册窗口）
+    captcha.py    TCaptcha 点选 provider（headless Playwright；默认开）
+    captcha_solver.py 点选 solver（多尺度/旋转 NCC + 匈牙利分配；可选依赖）
     redact.py     日志 / 输出边界的脱敏
     fsutil.py     原子写盘（唯一实现）
     cli.py        两个 CLI 入口共用的骨架

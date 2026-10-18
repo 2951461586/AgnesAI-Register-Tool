@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agnesai-register-tool"
 version = "0.1.0"
-description = "Agnes AI 注册 + API Key 提取（CF Worker 域名邮箱 + 验证码，零浏览器）"
+description = "Agnes AI 注册 + API Key 提取（CF Worker 域名邮箱 + TCaptcha 点选，headless 默认开）"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -32,6 +32,14 @@ dev = [
     "pytest>=8",
     "ruff>=0.16,<0.17",
 ]
+captcha = [
+    # 🔴 TCaptcha 点选 provider 的可选依赖（默认开）。不装就设
+    #    `AR_CAPTCHA_ENABLED=0`，但那样发码会被服务端 400 拒绝。
+    "playwright>=1.40",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "Pillow>=10",
+]
 
 # ⚠ 包名就叫 `src`，是个很泛的名字。之所以不改：全库有 20+ 处
 #    `from src.xxx import`，改名是纯 churn、且会让 git blame 失去意义。
@@ -41,7 +49,7 @@ dev = [
 # 🔴 `packages` 是**显式列表**，不会自动发现子包。**每次新增顶层包
 #    （或子包）都要回到这里加。**
 [tool.setuptools]
-packages = ["src", "common"]
+packages = ["src", "common", "common.config"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -81,6 +89,9 @@ ignore = [
 # ⚠ 代价：这个文件里**真的**多余的 import 不会被报出来。但"转出漏了"会被用例
 #    直接抓到（`tests/` 会 AttributeError），所以这个代价可以接受。
 "src/pipeline/__init__.py" = ["F401"]
+# 纯转出层：import 进来的名字**就是**它的对外 API，本地当然"用不到"。
+"common/config/__init__.py" = ["F401"]
+"src/pipeline/limiter.py" = ["F401"]
 
 [tool.pyright]
 # 🔴 基线是**干净**的（pyright 1.1.414，2026-10-14：50 个文件、0 error、0 warning）

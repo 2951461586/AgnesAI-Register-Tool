@@ -4,23 +4,26 @@ Agnes AI（国际站）的**端到端注册全链路**：CF Worker 域名邮箱 
 注册 → 密码登录 → 建 API Key → **推理网关实测 key 可用**。批量可跑，
 带台账、按出口的限流闸门、代理槽位池与收尾报告。
 
-> 🔴 **2026-10-15 16:24 起本工具跑不通**：②发验证码 这一步服务端开始要求
-> **captcha**（`400 Captcha verification is required`），而本工具没有 captcha
-> 能力。原文、复测与未测项见 [`docs/protocol.md`](docs/protocol.md) §2②。
+> 🔴 **2026-10-15 16:24 起 ②发验证码 要求 captcha**：主流水线已接入
+> **headless** TCaptcha provider（`src/captcha.py`，`AR_CAPTCHA_ENABLED` 默认开），
+> 解出 `ticket`/`randstr` 后交给发码请求。需要可选依赖：
+> `pip install -e ".[captcha]"` + `python -m playwright install chromium`。
+> 实测与未测项见 [`docs/protocol.md`](docs/protocol.md) §2②。
 
 ```bash
 cp .env.example .env      # 填 AR_WORKER_* 三项（见下）
+pip install -e ".[captcha]" && python -m playwright install chromium
 python run.py             # 跑 1 个账号
 python run.py --count 6   # 跑 6 个
 ```
 
-在此之前整条链路是标准 JSON API、**零浏览器**：没有验证码图片、没有 WAF 解盾，
-运行依赖只有 `requests` 一个（对比 [Intern-Register-Tool] 必须用真浏览器
-解阿里云验证码）。协议与实测证据在 [`docs/protocol.md`](docs/protocol.md)。
+2026-10-15 之前整条链路是标准 JSON API、**零浏览器**；现在 ②发码多了一步
+TCaptcha 点选 —— 由可选的 **headless Playwright** provider 处理（默认开），
+其余 5 步仍是裸 `requests`。协议与实测证据在 [`docs/protocol.md`](docs/protocol.md)。
 
 本项目是 [Intern-Register-Tool] 架构的**第三个同族实现**（继
 [Hark-Register-Tool] 之后），目录与分层刻意保持一致，便于在三者之间迁移经验：
-`common/config.py` + `src/{tempmail,agnes,apikey,pipeline,ledger,quota,report,redact,fsutil,cli}.py` +
+`common/config/` + `src/{tempmail,agnes,apikey,pipeline,ledger,quota,report,redact,fsutil,cli}.py` +
 `run.py` + `docs/` + `tests/` + `tools/`。
 
 ---
@@ -40,7 +43,8 @@ python run.py --count 4 --preflight    # 跑批前先体检出口链路（不耗
 ```
 
 🔴 **批量前建议加 `--preflight`**：注册窗口是本工具最贵且**不可再生**的资源
-（撞上就是 1 小时）。预检只打只读请求，**不消耗注册窗口**；判定链路处于
+（撞上要等一个窗口；长度见 `docs/protocol.md` §3 —— 实测上界远小于最初的
+保守假设）。预检只打只读请求，**不消耗注册窗口**；判定链路处于
 坏时段就**中止**（退出码 6），而不是把窗口白烧掉。
 判据不是"失败率高低"，而是"**多数出口一起坏**吗"—— 个别坏槽位不该拦住整批
 （撞到它换出口就行）。详见 `src/preflight.py`。
@@ -60,8 +64,9 @@ python run.py --count 4 --preflight    # 跑批前先体检出口链路（不耗
 | `AR_PASSWORD_LEN` | — | 默认 16。服务端硬要求 ≥ 8 |
 | `AR_KEY_NAME` | — | 创建的 API Key 名称，默认 `auto` |
 | `AR_VERIFY_MODEL` / `AR_VERIFY_CHAT` | — | key 校验用的模型 / 是否真打一次 chat |
-| `AR_REGISTER_MAX_PER_WINDOW` / `AR_REGISTER_WINDOW_S` | — | **按出口**的注册尝试限速（默认 **2 次** = **1 个账号** / **3600s**，**保守值**，见下）。⚠ 计的是**请求**，不是一个账号一枪 |
-| `AR_DOMAIN_MAX_PER_WINDOW` / `AR_DOMAIN_WINDOW_S` | — | **按收信域名**的注册尝试限速（默认 **2 次** = **1 个账号** / 3600s）。与 IP 维度**分开配** |
+| `AR_CAPTCHA_ENABLED` / `AR_CAPTCHA_HEADLESS` / `AR_CAPTCHA_TIMEOUT_S` | — | TCaptcha 点选 provider（默认**开**、**headless**、**直连**）。关掉后发码会被服务端 400 拒绝。完整项见 `.env.example` |
+| `AR_REGISTER_MAX_PER_WINDOW` / `AR_REGISTER_WINDOW_S` | — | **按出口**的注册尝试限速（默认 **2 次** = **1 个账号** / **3600s**；IP 阈值实测 ≈4，所以留了余量）。⚠ 计的是**请求**，不是一个账号一枪 |
+| `AR_DOMAIN_MAX_PER_WINDOW` / `AR_DOMAIN_WINDOW_S` | — | **按收信域名**的注册尝试限速（默认 **8 次** = **4 个账号** / 3600s；域名阈值实测 ≈10）。与 IP 维度**分开配** |
 | `AR_LIMITER_MAX_WAIT_S` | — | 本地闸门「等不起就换维度」阈值（秒，默认 20） |
 | `AR_REG_QUOTA_MAX` / `AR_REG_QUOTA_WINDOW_H` | — | **爆炸半径上限**（默认 30 / 24h），不是服务端配额 |
 | `AR_PROXY` / `AR_PROXY_SLOTS(_FILE)` / `AR_PROXY_SLOT_TIMEOUT` | — | 出口代理与槽位池（多出口并发） |
@@ -85,9 +90,11 @@ Agnes 对**注册尝试**（`/api/verification` 与 `/api/user/register`，**共
 🔴 它们是 **400，不是 429**。所以：
 
 - 🔴 **窗口计的是「请求」，而一个账号要打两枪**（发码 + 注册共用同一张计数）
-  ⇒ 默认的 `2` 实际只放行 **1 个账号 / 窗口**，不是 2 个。想跑 N 个账号，
-  两个维度的上限都要 ≥ `2N`。这一点曾被读成"2 个账号"，直接导致"码烧了、
-  注册进不去"（见下面第 4 点）；
+  ⇒ 上限 `MAX` 实际只放行 `MAX/2` 个账号/窗口。2026-10-18 起默认
+  `AR_REGISTER_MAX_PER_WINDOW=2`（1 个账号）/ `AR_DOMAIN_MAX_PER_WINDOW=8`
+  （4 个账号）—— IP 阈值实测 ≈4、域名阈值实测 ≈10，所以都留了余量。
+  想跑 N 个账号，两个维度的上限都要 ≥ `2N`。这一点曾被读成"2 个账号"，
+  直接导致"码烧了、注册进不去"（见下面第 4 点）；
 - **只调大 `--producers` 不会提高吞吐** —— 那是同一张窗口里的名额；
 - 提高吞吐要**两个杠杆一起上**：`AR_PROXY_SLOTS`（N 个出口 = N 张 IP 窗口）
   **和** `AR_MAIL_DOMAINS`（M 个域名 = M 张域名窗口）。只加一个，会立刻撞上
@@ -95,19 +102,21 @@ Agnes 对**注册尝试**（`/api/verification` 与 `/api/user/register`，**共
 - 撞到限流时本工具**先换维度**（IP 撞了就换出口、域名撞了就换域名），
   换不动才退避重试。
 
-⚠ **窗口长度尚未测准** —— 这条事实的唯一真源是
-[`docs/protocol.md`](docs/protocol.md) §3「限流：实测与未测」，
-**本文件刻意不重复那个数字**（同一份知识写两处必然漂移 —— 本项目实际漂移过：
-一处 `>4 分钟`、一处 `>45 分钟`、一处默认 `600s`）。所以本地闸门取保守值
-（默认 `2 次 / 3600s`，= 1 个账号）。测准它的方法见
-`tools/probes/probe_register_limit.py`。
+⚠ **窗口长度与阈值见 [`docs/protocol.md`](docs/protocol.md) §3**，
+**本文件刻意不重复那些数字**（同一份知识写两处必然漂移 —— 本项目实际漂移过：
+一处 `>4 分钟`、一处 `>45 分钟`、一处默认 `600s`）。2026-10-18 的实测推翻了
+旧的 "**阈值 2~3**"（实际 ≈10），并证明旧的 ">45 分钟" 的**依据**（连续打点
+会给窗口续命）不成立；但 45 分钟这个数字**被证实为下界**（45.37 分钟仍限流）。
+窗口长度的**上界**仍未测准 —— 具体数字与复现方法都在 §3。本地闸门默认值已
+据此调整（仍留安全余量），**不是**服务端阈值的精确复刻。
 
 🔴 **域名维度换不动，所以本地必须一次占够两枪**（`REQUESTS_PER_ACCOUNT`，
-真源在 `common/config.py`、由 `src/pipeline/limiter.py` 转出）。注册时域名已经
+真源在 `common/config/limits.py`、由 `src/pipeline/limiter.py` 转出）。注册时域名已经
 定死在邮箱里 —— 只留一格就发码，
 等于"码烧了、注册却进不去"。所以 `provision` 会先确认域名窗口装得下
 **两枪**，装不下就**一枪都不发**（`skipped`），而不是先烧了再说。
-实测依据：一次 5 账号跑批里 3 个就是这个形态（两个域名各 2/2 打满）。
+实测依据：一次 5 账号跑批里 3 个就是这个形态（当时默认是 2/2，两个域名各
+2/2 打满）。
 
 ### 2. 台账是账号的**唯一副本**
 
@@ -158,12 +167,23 @@ ledger/latest.json                          ← **本批结果**（含失败 / �
 ## 目录
 
 ```text
-common/config.py     全局配置与启动校验（AR_* 环境变量）
+common/config/       全局配置包（**只做转出**；按职责拆子模块）
+  ├ _env.py          .env 加载 / 环境变量解析 / 仓库根
+  ├ site.py          站点与运行时参数（base / 超时 / UA / 本地配额）
+  ├ mail.py          收信侧（Worker / 域名池 / 三个邮箱源）
+  ├ captcha.py       captcha provider 配置
+  ├ proxy.py         出口代理与槽位池
+  └ limits.py        注册尝试限流 + 启动校验（validate/lint）
 src/tempmail.py      CF Worker 邮箱客户端（建地址 + 按收件人收信 + 抽验证码）
 src/agnes.py         Agnes 控制台协议（verification/register/login/token/...）
 src/apikey.py        推理网关侧的 key 可用性校验
+src/captcha.py       TCaptcha 点选 provider（headless Playwright；**默认开**）
+src/captcha_solver.py 点选 solver（多尺度/旋转 NCC + 匈牙利分配；可选依赖）
 src/pipeline/        两段式流水线（P5 拆包：每个子模块只讲一件事）
-  ├ limiter.py       本地闸门：滑动窗口 / 域名预留 / 限流器工厂 / 换出口
+  ├ limiter.py       本地闸门**转出层**（window / reservation / registry）
+  ├ window.py        滑动窗口原语（SlidingWindow / WindowBusy）
+  ├ reservation.py   域名预留（DomainReservation）
+  ├ registry.py      限流器工厂 + 按维度挑桶 + 换出口
   ├ record.py        AccountRecord / Ticket / classify / STAGES
   ├ provision.py     生产者段：建邮箱 → 发码 → 等码
   ├ finish.py        消费者段：注册 → 登录 → 建 Key → 只读校验
@@ -189,8 +209,11 @@ tools/               探针与运维脚本
 
 ```bash
 python tools/probes/probe_domains.py         # 哪些收信域名真能收到 Agnes 的信
-python tools/probes/probe_register_limit.py  # 注册尝试限流的边界（⚠ 会消耗窗口）
+python tools/probes/probe_window_limits.py   # 受控测窗口长度 / 子域是否共窗（默认只打印计划）
+python tools/probes/probe_window_limits.py   # 受控测窗口长度 / 子域是否共窗（默认只打印计划）
 python tools/probes/probe_slots.py           # 出口池：IP 是否两两不同 / Agnes 是否可达
+python tools/probes/probe_captcha_egress.py  # captcha 出口质量：直连 vs 代理（A 段不耗窗口）
+python tools/ops/analyze_window_recovery.py  # 台账反推窗口恢复间隔（**零窗口代价**）
 python tools/ops/verify_accounts.py          # 台账账号存活复核（只读）
 python tools/data/export_keys.py             # 导出 sk- key 列表
 python tools/data/export_success.py          # 汇总成功账号 → `ledger/success/`（明文凭据，已 gitignore）
@@ -235,15 +258,20 @@ CI（`.github/workflows/ci.yml`）跑上面四样 + `gitleaks` 密钥扫描（**
 
 ## 已知限制
 
-- 🔴 **2026-10-15 16:24 起 ②发验证码 要求 captcha** —— 服务端返回
-  `400 Captcha verification is required`，而本工具**没有** captcha 能力
-  （“零浏览器”是它的设计前提）⇒ **整条链路在这一步断掉**（拿不到码，后面
-  5 步都不会发生）。读前端 bundle 已查清：是**腾讯防水墙 TCaptcha**
-  （appid `189979000`），发码那一枪要带 **`ticket` + `randstr`** ⇒ 要拿到它们
-  就得跑 JS widget（**需真浏览器**或打码平台）。实测原文、复测与未测项见
-  `docs/protocol.md` §2②。
-- **限流窗口未测准** —— 默认值是保守估计，不是服务端阈值（实测下界见
-  `docs/protocol.md` §3，那是唯一真源）。
+- ⚠ **captcha 单次求解成功率约 50%** —— 失败集中在**细长/被遮挡字形**
+  （「1」「2」「日」）被配到密集复合图标上。默认开、headless，且**直连**
+  （实测：直连与代理成功率一样，但直连快一倍；`uip` 不一致**没有被拒** ——
+  2026-10-18 复测 3 次里 2 次有效、全接受，见 `docs/protocol.md` §2②）。
+  降级策略：一次 45s 超时 → 换出口重试一次。失败记 `error_kind="captcha"`
+  （**不是** `rejected`）。实测数据见 `docs/protocol.md` §2②。
+- ⚠ **captcha provider 每路生产者启一个 headless Chromium**：`--producers 4`
+  = 4 个浏览器实例（每个约 300MB），且单题求解要 ~6~10s。批量时注意内存；
+  `--producers` 的实际收益受内存与注册窗口双重限制。
+- ⚠ **captcha 依赖是可选 extra** —— 不装 `pip install -e ".[captcha]"` 时
+  `config.validate()` 会在启动阶段报错；设 `AR_CAPTCHA_ENABLED=0` 可关掉，
+  但发码会被服务端 400 拒绝。
+- **限流阈值仍未全部测准** —— 域名阈值已实测（见 `docs/protocol.md` §3），
+  但 **IP 阈值**仍未知；默认值留了安全余量，不是服务端阈值的精确复刻。
 - **单出口 / 单域名吞吐有限**：两个杠杆（`AR_PROXY_SLOTS` + `AR_MAIL_DOMAINS`）
   不一起配时，批量会被同一张 IP 或域名窗口卡住。
 - **可用域名受 Agnes 侧白名单限制** —— 邮箱源有**三个**（自有 CF Worker 域名 /
@@ -251,7 +279,7 @@ CI（`.github/workflows/ci.yml`）跑上面四样 + `gitleaks` 密钥扫描（**
   自有域名不需要报备（没有 OpenXLab 那种 `A0232` 域名门），但**平台侧有一道域名
   白名单**（可用 / 被拒清单见 `docs/protocol.md` §2）。第三方临时邮箱域名大多被拒
   ⇒ **实际可用的域名数才是吞吐硬上限**。新增源 = 实现 `src/mailbox.py` 的
-  `MailboxSource` 契约 + 在 `common/config.py` 登记它的域名。
+  `MailboxSource` 契约 + 在 `common/config/mail.py` 登记它的域名。
 - **不处理找回密码 / 二次验证** —— 临时邮箱收不到找回信，台账丢了就是丢了。
 - 本工具仅供学习与自用；请遵守 Agnes 的服务条款。
 

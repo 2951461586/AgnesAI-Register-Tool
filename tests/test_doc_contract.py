@@ -21,6 +21,8 @@
 import re
 from pathlib import Path
 
+from config_source import config_source_text
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # 落**明文凭据**的目录 → 是否由**代码**写入。
@@ -136,9 +138,14 @@ def test_rate_limit_docs_point_at_the_single_source():
       守卫：有旋钮的地方就得有指针。
     """
     knobs = ("MAX_PER_WINDOW", "WINDOW_S")
+    texts = {
+        "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+        ".env.example": (ROOT / ".env.example").read_text(encoding="utf-8"),
+        # 配置已拆成包：必须扫整个包，不能只读门面。
+        "common/config/": config_source_text(),
+    }
     offenders = []
-    for rel in ("README.md", ".env.example", "common/config.py"):
-        text = (ROOT / rel).read_text(encoding="utf-8")
+    for rel, text in texts.items():
         if any(k in text for k in knobs) and "protocol.md" not in text:
             offenders.append(rel)
     assert not offenders, (
@@ -169,7 +176,7 @@ def test_env_example_lists_every_knob_the_code_reads():
     实测踩过：`AR_MAIL_DOMAINS` / `AR_LIMITER_MAX_WAIT_S` 这类旋钮在
     `.env.example` 里缺席或只在注释里出现，用户根本不知道它存在。
     """
-    code = (ROOT / "common" / "config.py").read_text(encoding="utf-8")
+    code = config_source_text()
     read = set(re.findall(r'os\.getenv\("(AR_[A-Z_]+)"', code))
     read |= set(re.findall(r'_env_(?:int|float|bool)\("(AR_[A-Z_]+)"', code))
     assert read, "没从 config.py 里抽出任何 AR_* 变量 —— 本用例的前提变了，请重看"
@@ -324,9 +331,13 @@ def test_no_bare_measured_window_value_outside_protocol():
     判据按**段落**而不按行 —— 见 `_paragraphs` 的注释。
     """
     needle = "45 分钟"
+    texts = {
+        "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
+        ".env.example": (ROOT / ".env.example").read_text(encoding="utf-8"),
+        "common/config/": config_source_text(),
+    }
     offenders = []
-    for rel in ("README.md", ".env.example", "common/config.py"):
-        text = (ROOT / rel).read_text(encoding="utf-8")
+    for rel, text in texts.items():
         for para in _paragraphs(text):
             if needle in para and "漂移" not in para:
                 offenders.append(f"{rel}: {para.strip()[:80]}")
@@ -363,16 +374,18 @@ def test_zero_browser_claim_must_acknowledge_the_captcha_gate():
       agnes / pipeline）—— 新增一处“零浏览器”就把它加进来。
     """
     files = (
-        "README.md",
-        "docs/protocol.md",
-        "common/config.py",
-        "run.py",
-        "src/agnes.py",
-        "src/pipeline/__init__.py",
+        ("README.md", (ROOT / "README.md").read_text(encoding="utf-8")),
+        ("docs/protocol.md", (ROOT / "docs" / "protocol.md").read_text(encoding="utf-8")),
+        ("common/config/", config_source_text()),
+        ("run.py", (ROOT / "run.py").read_text(encoding="utf-8")),
+        ("src/agnes.py", (ROOT / "src" / "agnes.py").read_text(encoding="utf-8")),
+        (
+            "src/pipeline/__init__.py",
+            (ROOT / "src" / "pipeline" / "__init__.py").read_text(encoding="utf-8"),
+        ),
     )
     offenders = []
-    for rel in files:
-        text = (ROOT / rel).read_text(encoding="utf-8")
+    for rel, text in files:
         if "零浏览器" in text and "captcha" not in text.lower():
             offenders.append(rel)
     assert not offenders, (
@@ -424,3 +437,54 @@ def test_pyright_job_installs_pytest():
         "  ⇒ CI 报 reportMissingImports，而**本地是绿的**（本机装了 pytest）。\n"
         '  修法：在那个 job 的安装步骤里加上 `pip install "pytest>=8"`。'
     )
+
+
+# ── 2026-10-18：窗口长度 / 阈值的实测 ─────────────────────────────
+def test_protocol_md_records_the_window_measurement():
+    """🔴 守卫：窗口长度/阈值的实测必须留在唯一真源里。
+
+    这条与 `test_protocol_md_records_the_captcha_gate` 同形：窗口长度是
+    **最容易被"感觉"覆盖**的一条知识 —— 旧文档写过 `>4 分钟`、`>45 分钟`、
+    默认 `600s` 三个互不相同的值，而每次都没有报错。2026-10-18 的实测
+    推翻了旧结论（阈值 ≈10、窗口上界 ~15 分钟），所以这里钉住三件事：
+      · 两个测量工具的名字（否则下一个人不知道结论是怎么来的）；
+      · 测量日期（事实有时效，平台随时可能改）；
+      · 阈值 ≈10（如果平台改了，这条会红，逼人重测/改文档）。
+    """
+    text = (ROOT / "docs" / "protocol.md").read_text(encoding="utf-8")
+    assert "analyze_window_recovery.py" in text, "protocol.md 没提台账反推工具"
+    assert "probe_window_limits.py" in text, "protocol.md 没提受控探针"
+    assert "2026-10-18" in text, "protocol.md 没写这次实测的日期"
+    assert "阈值 ≈10" in text, "protocol.md 没写域名阈值的实测值（≈10）"
+    assert "IP 阈值 ≈4" in text, "protocol.md 没写 IP 阈值的实测值（≈4）"
+    assert "45.37" in text, "protocol.md 没写 45 分钟复测的结果（45.37 分钟仍限流）"
+
+
+def test_env_example_rate_limit_defaults_match_config():
+    """🔴 守卫：`.env.example` 里注释掉的限流默认值必须与代码一致。
+
+    实测事故（本会话）：`AR_CAPTCHA_TIMEOUT_S` 的注释写 90，而代码默认 45 ——
+    用户照 `.env.example` 理解"默认值"，实际跑的是另一个数。
+    ⚠ 只查**四个限流旋钮**：其他旋钮的注释可能故意展示"非默认的推荐值"，
+      全量比对会变成噪音（例如 captcha 的 timeout 注释就是调试用的宽值）。
+    """
+    cfg = config_source_text()
+    env = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for name, kind in (
+        ("AR_REGISTER_MAX_PER_WINDOW", "int"),
+        ("AR_REGISTER_WINDOW_S", "float"),
+        ("AR_DOMAIN_MAX_PER_WINDOW", "int"),
+        ("AR_DOMAIN_WINDOW_S", "float"),
+    ):
+        fn = "_env_int" if kind == "int" else "_env_float"
+        m = re.search(rf'^\w+ = max\([^,]+, {fn}\("{name}", ([\d.]+)\)\)', cfg, re.M)
+        assert m, f"config.py 里找不到 {name} 的默认值 —— 本用例的前提变了"
+        code_default = float(m.group(1))
+        m2 = re.search(rf"^#\s*{name}=(\S+)", env, re.M)
+        assert m2, f".env.example 里没有注释掉的 {name}=<默认值>"
+        env_default = float(m2.group(1))
+        assert env_default == code_default, (
+            f"`{name}` 的默认值不一致：config.py={code_default:g}，"
+            f".env.example={env_default:g}\n"
+            f"  用户唯一的配置入口是 .env.example —— 两边不一致等于骗人。"
+        )

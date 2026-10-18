@@ -13,7 +13,13 @@
    要防的事 —— 而它的实际后果是**本项目长期无法上 CI**。
 """
 
+import os
+
 import pytest
+
+# 🔴 用例不启动浏览器：`config.CAPTCHA_ENABLED` 在 **import 时**读取，所以必须在
+#    任何项目 import 之前设好。需要测 captcha 的用例自己注入假 provider。
+os.environ["AR_CAPTCHA_ENABLED"] = "0"
 
 
 @pytest.fixture(autouse=True)
@@ -34,7 +40,7 @@ def _isolate_state(tmp_path, monkeypatch):
     # 🔴 域名维度的窗口也要隔离，理由与下面清字典一样：两个 limiter 字典都是
     #    **模块级全局**、跨用例共享，且 limiter 是**懒建**的（建的那一刻才读
     #    config）。只 patch IP 维度不 patch 域名维度的话，域名 limiter 会用真实
-    #    默认值（2 次 / 3600s）建出来，两个用例就打满了 —— 之后每个用例都会在
+    #    默认值（4/8 次 / 3600s）建出来，两个用例就打满了 —— 之后每个用例都会在
     #    `acquire()` 里抱着 1 小时的窗口睡死（曾让 tests/test_pipeline.py
     #    整文件必挂，2026-10-13）。清字典保证下个用例重建时读到隔离值。
     monkeypatch.setattr(pipeline.config, "DOMAIN_MAX_PER_WINDOW", 100)

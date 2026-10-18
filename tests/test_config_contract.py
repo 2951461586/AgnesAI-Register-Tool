@@ -5,7 +5,7 @@
      账号**（`floor(MAX/2) == 0`），这是**静默失效**，必须被 `validate()` 拦下；
   2. 奇数上限会**静默**丢掉最后一格（`MAX=3` 看着像 3 个账号、实际 1 个），
      由 `lint()` 提醒 —— 但**不**硬拦（能跑，只是浪费）；
-  3. `REQUESTS_PER_ACCOUNT` 只有**一个真源**（`common/config.py`），
+  3. `REQUESTS_PER_ACCOUNT` 只有**一个真源**（`common/config/limits.py`），
      `src/pipeline/`（`limiter.py` 转出）是转出。
 
 为什么值得单独一个文件：这两个数字（`MAX_PER_WINDOW` 与"一个账号要几枪"）
@@ -14,6 +14,7 @@
 """
 
 from common import config
+from common.config import limits as config_limits
 from src import pipeline
 
 
@@ -37,8 +38,8 @@ def test_window_smaller_than_one_account_is_rejected(monkeypatch):
     这是最坏的一类配置错误：不报错、不告警，只是每个账号都被本地闸门 skip，
     现象看着像"域名全被限流"（实测踩到过类似的误导）。
     """
-    monkeypatch.setattr(config, "REGISTER_MAX_PER_WINDOW", 1)
-    monkeypatch.setattr(config, "DOMAIN_MAX_PER_WINDOW", 1)
+    monkeypatch.setattr(config_limits, "REGISTER_MAX_PER_WINDOW", 1)
+    monkeypatch.setattr(config_limits, "DOMAIN_MAX_PER_WINDOW", 1)
     bad = _max_entries(config.validate())
     assert len(bad) == 2, bad
     assert all("永远跑不出账号" in b for b in bad), bad
@@ -46,8 +47,8 @@ def test_window_smaller_than_one_account_is_rejected(monkeypatch):
 
 def test_odd_window_warns_but_does_not_block(monkeypatch):
     """奇数上限：**能跑**（所以不拦），但会静默浪费最后一格 ⇒ `lint()` 提醒。"""
-    monkeypatch.setattr(config, "REGISTER_MAX_PER_WINDOW", 3)
-    monkeypatch.setattr(config, "DOMAIN_MAX_PER_WINDOW", 3)
+    monkeypatch.setattr(config_limits, "REGISTER_MAX_PER_WINDOW", 3)
+    monkeypatch.setattr(config_limits, "DOMAIN_MAX_PER_WINDOW", 3)
 
     assert _max_entries(config.validate()) == []  # 不硬拦
     warn = _max_entries(config.lint())
@@ -59,8 +60,8 @@ def test_odd_window_warns_but_does_not_block(monkeypatch):
 
 def test_even_window_is_silent(monkeypatch):
     for v in (2, 4, 6):
-        monkeypatch.setattr(config, "REGISTER_MAX_PER_WINDOW", v)
-        monkeypatch.setattr(config, "DOMAIN_MAX_PER_WINDOW", v)
+        monkeypatch.setattr(config_limits, "REGISTER_MAX_PER_WINDOW", v)
+        monkeypatch.setattr(config_limits, "DOMAIN_MAX_PER_WINDOW", v)
         assert _max_entries(config.lint()) == [], v
         assert _max_entries(config.validate()) == [], v
 
@@ -71,8 +72,8 @@ def test_lint_does_not_repeat_validate_with_a_silly_suggestion(monkeypatch):
     否则它会给出"建议改成 0" —— 0 格等于关掉闸门，是个**荒谬**的建议，
     而一条荒谬的建议会让人不再信任整个 lint。
     """
-    monkeypatch.setattr(config, "REGISTER_MAX_PER_WINDOW", 1)
-    monkeypatch.setattr(config, "DOMAIN_MAX_PER_WINDOW", 1)
+    monkeypatch.setattr(config_limits, "REGISTER_MAX_PER_WINDOW", 1)
+    monkeypatch.setattr(config_limits, "DOMAIN_MAX_PER_WINDOW", 1)
     assert _max_entries(config.lint()) == []
     assert "建议改成 0" not in " ".join(config.lint())
 

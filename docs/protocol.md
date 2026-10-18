@@ -6,7 +6,7 @@
 > 把猜测写成结论是这个项目最不能犯的错。
 >
 > 🔴 **2026-10-15 追加了一条推翻前提的发现**：②发验证码 开始要求 **captcha**
-> （见 §2②）。在那之前“零浏览器”成立；现在整条链路在这一步断掉。
+> （见 §2②）。在那之前“零浏览器”成立；现在 ② 多了一步 headless captcha。
 
 ---
 
@@ -61,9 +61,14 @@ HTTP 400 {"code":400,"message":"Captcha verification is required"}
 - 分类落在 **`rejected`**（服务端明确拒绝）—— **不是** `quota`、也不是 `network`。
   判据见 `src/agnes.py` 的 `_request`（4xx → `AgnesRejected`）。
 
-### 要哪种 captcha、怎么传（2026-10-15 读**前端 bundle** 查清，零窗口代价）
+### captcha 的形态与过法（2026-10-17 用**完整 HAR** 钉死）
 
-🔴 结论：**腾讯防水墙 TCaptcha** —— **不是** Cloudflare Turnstile / hCaptcha。
+🔴 结论：**腾讯防水墙 TCaptcha**（**不是** Cloudflare Turnstile / hCaptcha），
+形态是**点选**（按提示顺序点 N 个图标）—— **不是**拖动，也**不是**无感。
+
+证据来源：一份 2026-10-17 的**完整成功注册 HAR**（132 条请求，直连、
+非槽位池），抓到了 `prehandle → 两张图 → verify → ticket → /api/verification`
+的全程。下面每个字段都是**实测原文**，不是从 bundle 猜的。
 
 - 脚本：`ca.turing.captcha.qcloud.com/TCaptcha-global.js`
   （`NEXT_PUBLIC_TENCENT_CAPTCHA_REGION="global"` ⇒ 走 global 那一支；
@@ -72,35 +77,164 @@ HTTP 400 {"code":400,"message":"Captcha verification is required"}
 - 回调给的是 **`{ret, ticket, randstr}`** 一对值。
 - 🔴 **传参方式**：发码那一枪（`/api/verification`，GET）带上 **`ticket` +
   `randstr`** 两个参数 —— 前端原文：`x.aT({email, purpose, ticket, randstr})`。
-  **其余端点不带**（`/api/user/register` 的调用里没有它们）⇒ 这道门
-  **只装在发码上**。
+  **其余端点不带**：HAR 里 `/api/user/register`、`/api/user/login`、`/api/token`
+  的 body/query 都**没有**这两个参数 ⇒ 这道门**只装在发码上**（已实测确认，
+  不再是"从前端看大概率不要"）。
 - ⚠ 本工具目前只发 `email` + `purpose` ⇒ 必被拒。这就是那条 400 的直接原因。
 
-🔴 **适配代价：需要真浏览器**（或打码平台）—— TCaptcha 是 JS widget，`ticket`
-只能由它在页面里跑出来后拿到 ⇒ **这推翻了"零浏览器"前提**。三条路：
+#### 完整流程（HAR 实测）
 
-1. **真浏览器**（Playwright/Selenium）跑注册页 → 加一个重依赖 + 无头检测风险；
-2. **打码平台**（支持 TCaptcha 的）→ 花钱、依赖第三方，且**很可能违反服务条款**；
-3. 见下面那条"未测"。
+```text
+GET  cap_union_prehandle?aid=189979000&showtype=popup&entry_url=.../login
+       ← sess + dyn_show_info + comm_captcha_cfg.pow_cfg
+GET  tdc.js?app_data=...                    ← 设备指纹 JS（eks 的来源）
+GET  cap_union_new_getcapbysig?img_index=0  ← 提示图 170×50（要点的图标与顺序）
+GET  cap_union_new_getcapbysig?img_index=1  ← 背景图 672×480（目标 + 干扰项）
+POST cap_union_new_verify
+       collect=<1752字符> tlg=<长度守卫> eks=<236字符> sess=<514字符>
+       ans=<明文坐标数组> pow_answer=<prefix+N> pow_calc_time=<秒>
+       ← {"errorCode":"0","randstr":"@xxxx","ticket":"tr...","errMessage":""}
+GET  /api/verification?email=&purpose=register&ticket=tr...&randstr=@xxxx
+       ← 200 ok
+```
 
-⚠ **未测清**（别当结论用）：
+#### 点选：`ans` 是**明文**坐标数组
 
-- 是**全局**要求，还是**按量 / 按时段 / 按出口子网**触发？观测到的那一批里
-  **前 4 个账号成功、之后 7 个全被拦**（跨 7 个域名、7 个不同出口），但
-  "那 4 个只是翻转前恰好过了"与"按量升级"从单批数据**区分不了**。
-- **其它端点是否也要**：从**前端**看 register 不带 `ticket`/`randstr` ⇒ 大概率
-  不要，但**没实测**（要实测就得先过发码那道门）。
+`dyn_show_info` 里明确写着（HAR 原文）：
+
+```json
+{"instruction":"请依次点击：",
+ "bg_elem_cfg":{"size_2d":[672,480],
+   "click_cfg":{"mark_style":"inc_number","data_type":["DynAnswerType_POS"]},
+   "img_url":"/cap_union_new_getcapbysig?img_index=1&..."},
+ "ins_elem_cfg":[{"id":1,"sprite_pos":[0,0],"size_2d":[170,50]}]}
+```
+
+`verify` 里的 `ans` 长这样（HAR 原文，3 个点）：
+
+```json
+[{"elem_id":1,"type":"DynAnswerType_POS","data":"39,272"},
+ {"elem_id":2,"type":"DynAnswerType_POS","data":"266,260"},
+ {"elem_id":3,"type":"DynAnswerType_POS","data":"351,187"}]
+```
+
+⇒ **答案格式极简**：按顺序点的 N 个 `(x,y)`，坐标落在 `size_2d` 内。
+难的不是格式，是**从背景图里认出提示图那 N 个图标在哪**。
+
+⚠ 这一步**已做出原型并跑通 live**：`.workbuddy-ai/captcha/solve_click.py`
+（探针侧、不进 `src/` 的运行依赖）用「纯黑掩码 + 清理提示图噪点 + 多尺度/旋转
+NCC + 匈牙利分配」，在 HAR 样本上 **3/3 分配正确**。
+
+#### 2026-10-17 live 实测：headless 全链路已跑通
+
+在 **headless** Chrome 下用 `probe_captcha.py --auto-solve` 跑通了一次完整链路：
+
+```text
+点选 3 图标（solver ~6.2s）→ 点击 3/3 → .tc-action.verify-btn
+→ cap_union_new_verify: errorCode=0
+→ ticket=tr03... / randstr=@WXZ
+→ /api/verification 200 {"code":200,"message":"ok"}
+```
+
+关键实测值：
+
+- **点击映射**：图像坐标 → `.tc-imgarea` 的 `bounding_box`（本次显示 340×243，
+  缩放 0.506×0.506）。widget 记录的 `ans` 与我们的点击点差 **~11px**（它会吸附），
+  服务端**接受**（`errorCode=0`）⇒ 容差 ≥ 11px。
+- **确认按钮**：popup 模式要的是 **`.tc-action.verify-btn`**（带 `show` 类），
+  不是 `.verify-btn` —— 后者会先命中 embed 模式的隐藏按钮（实测踩过）。
+- **PoW**：本次 `N=50089`，Python **43.6ms**（比 HAR 样本的 132 难，但仍毫秒级）。
+- **headless 可用**：本次没有触发无头检测；`tdc.js` 的 `eks` 由页面自己生成。
+
+⚠ **solver 的准确率随题变化**：3 张 live 样本里 2 张 **2/3**、1 张 **3/3**。
+最弱的是「2」字形 —— 它容易被圆形 smiley / 眼镜镜片抢走（NCC 上圆形弧线
+比被遮挡的「2」更像模板）。本次成功的题里 3 个图标都清晰、分数 0.76~0.83。
+
+#### PoW：`md5(prefix + N) == target`，纯 Python 可秒解
+
+`prehandle` 的 `comm_captcha_cfg.pow_cfg`：
+
+```json
+{"prefix":"<16位hex>#","md5":"<32位hex>"}
+```
+
+`verify` 里的 `pow_answer` = `prefix + str(N)`，且
+**`md5(pow_answer) == pow_cfg.md5`**（HAR 样本 `N=132`，JS 侧
+`pow_calc_time=2` 秒；Python 暴力搜毫秒级）。
+⇒ 这一层**不需要浏览器**，是纯计算。
+
+#### 真正的壁垒：`collect` + `eks`
+
+- `collect`（HAR 里 1752 字符）：点击轨迹 / 行为加密数据，由 `dy-ele.js` 生成；
+- `eks`（236 字符）：TDC 设备指纹，由混淆过的 `tdc.js`（`__TENCENT_CHAOS_VM`）生成；
+- `sess`：`prehandle` 下发，一次性。
+
+这三个是**混淆 JS 的运行时产物**，无法从 HAR 推导，也无法用纯 `requests` 伪造
+（HAR 里的 `sess`/`ticket` 都已消费、且绑定当次指纹与 IP，**不可重放**）。
+
+#### 适配路线（按可行性）
+
+1. **真浏览器（Playwright/Selenium）+ 自动点选**：让页面 JS 自己生成
+   `collect/eks/sess/PoW`，我们只负责「从背景图认出 N 个图标 → 按顺序点击」，
+   再从回调取 `ticket/randstr`。HAR + **2026-10-17 headless live** 已证明
+   这条路能走通（`verify errorCode=0` → `/api/verification 200`）。
+   代价：+Playwright 重依赖 + 无头指纹检测风险（`tdc.js` 会采集环境）。
+2. **打码平台**：把图发给平台拿坐标 —— 但**仍要解决 `collect/eks`**，
+   除非平台直接代过整个 TCaptcha；且很可能违反服务条款。
+3. **纯 Python 复刻**：PoW 和 `ans` 都能做，但 `collect/eks` 是混淆 VM ⇒ 不现实。
+4. **前端降级路径**：见下面"仍未测清"。
+
+⚠ **仍未测清**（别当结论用）：
+
+- **是全局要求，还是按量 / 按时段 / 按出口触发？** live 只跑了几次（直连、
+  非槽位池），它证明「至少这几次是交互式点选」，**不能**证明「住宅 IP 就无感」，
+  也不能证明「所有出口都要」。此前观测到的那一批里前 4 个账号成功、之后 7 个
+  全被拦（跨 7 个域名、7 个不同出口），与「按量升级」仍**区分不了**。
 - 🔴 前端里有一条**降级路径**，值得单独测一次：captcha 脚本**加载失败**时
   前端**自己造**一对值发出去 —— `ticket="trerror_1001_189979000_<unix秒>"`、
   `randstr="@"+随机串`（原文函数 `N()`，`errorCode:1001,
   errorMessage:"jsload_error"`）。⇒ **服务端认不认这对假值，未测**。
   认 ⇒ 不用浏览器也能过；不认 ⇒ 只能上真浏览器 / 打码。
   ⚠ 用它是**主动绕过**风控，且很可能违反服务条款。
+- **图标识别的泛化仍未测**：HAR 的背景图是照片 + 黑色线稿图标，提示图是
+  同一批图标的缩略图；两者**尺寸/旋转都不固定**（实测见过 0.4×、180°、
+  被眼镜遮挡的「2」）。**单次求解成功率约 50%**（下面「出口与准确率」的实测），
+  失败集中在**细长/被遮挡字形**（「1」「2」「日」）被配到**密集复合图标**上。
+  ⇒ 换图标集 / 换背景的准确率**未测**。
 
-🔴 **后果**：本工具**没有** captcha 能力（“零浏览器”是它的设计前提）⇒ 这一枪
-拿不到码，**整条链路在这一步断掉**。项目在 6 处把"零浏览器"当**前提**来论证
-设计（分两段的理由、依赖面只有 `requests`），**那些前提当前不成立**。
-`tests/test_doc_contract.py` 有一条守卫钉住“说了零浏览器就必须提到 captcha”。
+#### 出口与准确率（2026-10-17 实测，`tools/probes/probe_captcha_egress.py`）
+
+两个问题分开测，结论都推翻了原来的保守假设：
+
+| 问题 | 实测 | 结论 |
+| --- | --- | --- |
+| 浏览器走不走代理，影响**成功率**吗 | 直连 1/2、代理 1/2（失败都是 `errorCode=50`） | **不影响**。失败是 solver，不是链路 |
+| 影响**耗时**吗 | 直连 23.0s / 26.0s；代理 49.4s / 54.2s | **直连快一倍** ⇒ 默认 `AR_CAPTCHA_USE_PROXY=0` |
+| `uip` 不一致会被拒吗 | 2026-10-17：直连解 ticket → **代理**发码：`200 {"code":200,"message":"ok"}`；2026-10-18 复测 **2/2 接受**（第 3 个样本 captcha 没解出来） | **没有被拒**（3 次里 2 次有效、全接受）⇒ **不**需要强制同一出口 |
+
+⚠ 上表第 3 行在 2026-10-17 只有**一个**样本；2026-10-18 用
+`probe_captcha_egress.py --uip-test --uip-runs 3` 复测到 **2/2 接受**（第 3 个
+样本是 captcha solver 的 `errorCode=50`，不是 uip 拒绝）。样本仍小（n=2），
+所以结论保持为"**到目前为止没被拒**"，不是数学证明。现在默认直连（快一倍），
+但 `AR_CAPTCHA_USE_PROXY=1` 保留旧行为；若哪天发码开始报
+`Captcha verification is required`，第一件事就是把它打开重测。
+
+降级策略（按实测定的）：**一次 45s 超时 → 换出口重试一次**，不再在同一个出口上
+重开浏览器。旧行为（90s × 2 次）实测 **267s/账号**，而新策略下整批中位 **~45s**。
+live 5 批的成功数：`2/5`（旧 solver）→ `1/5`（新 solver + 代理 captcha）→ **`3/5`**（新 solver + 直连 captcha）。
+
+⚠ **HAR 本身含明文凭据**（账号密码 / JWT / `sk-` key / 出口 IP / 会话令牌）
+⇒ **不要提交进仓库、不要贴 issue**。本文只引用形状，不引用值。
+
+🔴 **现状（2026-10-17）**：主流水线已接入可选 captcha provider（`src/captcha.py`，
+**默认开、headless**）：发码前先解出 `ticket`/`randstr`，再走原来的 `requests`。
+`src/` 的运行依赖变成 `requests` + **可选** `[captcha]` extra；不装就
+`AR_CAPTCHA_ENABLED=0`（但发码会被服务端 400 拒绝）。provider 失败归
+`error_kind="captcha"`（**不是** `rejected`）。
+
+✅ HAR 同时证明：**过了这道门之后，`/api/user/register`、`/api/user/login`、
+`/api/token` 全部 200** ⇒ 链路其余 5 步的协议**没有变**，缺的只是发码那一枪的
+`ticket/randstr`。
 
 - `purpose=register` 是实测用的取值（注册流程）。
 - **不存在的域名也返回 200**（拿 `@example.com` 试过）—— 服务端不在这一步
@@ -152,11 +286,50 @@ HTTP 400 {"code":400,"message":"Captcha verification is required"}
 自有域名当主力，`catchmail` / `smailr` 当溢出容量（`smailr` 给 4 个域名，
 是三个源里最值的一个）。详见 `src/mailbox.py`。
 
-⚠ **未测清**：**子域是不是独立窗口**。间接证据是"`own.example` 与
-`sub.own.example` 同时成功"—— 若服务端把它们算**同一个域名**，则合计 4 次
-请求会超阈值（2~3）⇒ 很可能按**精确 hostname** 计。但没测准，**不当结论用**。
+#### 子域是不是独立窗口（2026-10-18 重新测）
+
+🔴 **旧结论的理由作废，但结论（独立）被实测确认。** 旧文档写"子域很
+可能按**精确 hostname** 计"，依据是"`own.example` 与 `sub.own.example` 同时
+成功 ⇒ 合计 4 次会超阈值（2~3）"。但 2026-10-18 实测发现：**域名阈值不是
+2~3，而是 ≈10**，所以"4 次没超"什么也证明不了 —— 旧结论是**碰巧对了**。
+
+新的受控实测（`tools/probes/probe_window_limits.py`）：
+
+| 实验 | 结果 |
+| --- | --- |
+| 同一域名、**不同出口**打 3 枪 | 全过 ⇒ 阈值 > 3 |
+| 同一域名、**同一出口**打 3 枪 | 全过 ⇒ 阈值 > 3（所以不是 2~3） |
+| **全新域名**、**10 个不同出口**连打 10 枪 | 前 9 枪过，**第 10 枪** `Too many registration attempts from this email domain` ⇒ **阈值 ≈10 / 窗口**，且**跨出口计数** ⇒ 域名窗口是**全局**的 |
+| 历史台账（2026-10-14 02:06~02:17） | 14 次域名限流里 **13 次**在 ±5 分钟内"父/子另一边也被域名限流"；只有 1 次另一边在 157s 后发码成功 |
+
+⇒ 要测"子域是否独立"，必须先把**父域打满 ~10 枪**，再立刻探子域：
+
+- 子域成功 ⇒ 独立（按精确 hostname）；
+- 子域也被域名限流 ⇒ **共窗**（按可注册域）。
+
+⚠ 历史台账那 13/14 次"两边同时限流"**不能**当共窗证据：当时 4~5 路生产者
+同时打这两个 hostname，两边各自撞自己的阈值，时间上自然接近。受控实验
+（一次只打一边、打满后立刻探另一边）才是判据。
+
+⚠ 受控复测（2026-10-18，`own.example` / `sub.own.example`）：父域第 7 枪被
+`Too many registration attempts from this email domain` 拒后，**换一个出口**
+立刻给子域发码 → `200 ok`。结合 §3 的"10 个不同出口一起计数"（域名窗口是
+**全局**的，换出口绕不过去）⇒ **子域是独立窗口（按精确 hostname 计）**。
+⚠ 这次父域第 7 枪就打满（而不是 10 枪），是因为 43 分钟前的 3 枪仍在窗口里
+—— 见 §3 的"多级限流"讨论；它不影响"子域独立"这个结论。
+（⚠ 显示出来的槽位串相同是因为 `redact_url` 把 lajiao 的 sid 抹掉了；实际
+用的是**另一个 full slot**。同一出口下**无法**复测：IP 阈值 ≈4 < 域名阈值
+≈10，一个出口打不满域名窗口 —— 但域名计数是全局的，所以跨出口的结论成立。）
+
+⇒ 本地闸门**按精确 hostname 分桶**与实测一致（同父域的子域各有一张窗口）。
+⚠ 这条现在是**实测事实**，不是"保守假设"：若哪天服务端改成按可注册域计，
+本地闸门会变得**过于乐观** —— 第一症状是子域发码开始收到
+`Too many registration attempts from this email domain`；那时把
+`domain_limiter` 的键改成父域。
+
 （另：Worker 只在自己配置的域名上建地址 —— `probe.own.example` 会 HTTP 400，
-所以子域这条路即使成立，也要先改 Worker。）
+所以子域这条路即使成立，也要先改 Worker。本项目的 `sub.own.example` /
+`sub.smailr.example` 已经在 `AR_MAIL_DOMAINS` 里，所以可以直接测。）
 
 ### ③ 验证码邮件
 
@@ -267,7 +440,9 @@ POST https://apihub.agnes-ai.com/v1/chat/completions {"model":"agnes-2.5-flash",
    在被限流时返回**同一条消息**。
 
   🔴 **推论（很重要，曾被读错）：窗口计的是「请求」，而一个账号要打两枪**
-  ⇒ `AR_*_MAX_PER_WINDOW=2` 的真实含义是 **1 个账号/窗口**，不是 2 个。
+  ⇒ 上限 `MAX` 实际只放行 `MAX/2` 个账号/窗口。2026-10-18 起默认
+  `AR_REGISTER_MAX_PER_WINDOW=2` / `AR_DOMAIN_MAX_PER_WINDOW=8`
+  （IP 阈值实测 ≈4、域名阈值实测 ≈10，所以都留了余量）。
   想跑 N 个账号，两个维度的上限都要 ≥ `2N`。
 
 - **域名维度在注册时换不动** —— 域名已经写死在邮箱地址里。所以本地闸门
@@ -301,41 +476,136 @@ POST https://apihub.agnes-ai.com/v1/chat/completions {"model":"agnes-2.5-flash",
    `400 Passwords do not match` / `422 body -> code: String should have at least
    4 characters`），**不触发**限流消息。⇒ 不能拿"没被限流"当"请求有效"。
 
-- **一次 ~16 连发的突发会触发**，且触发后 **>45 分钟仍被拦**：早期 30s 间隔
-  探测在 **t+214s** 仍 400；后续同出口复测在 **t+45 分钟**仍被拦
-  （⇒ 早期那条「窗口 >4 分钟」的结论已被这个更强的观测取代）。
+### 窗口长度与阈值（2026-10-18：台账反推 + 受控实测）
 
-  🔴 **但这个 "~16" 的维度归属存疑**（2026-10-14 复核探针时发现）：
-  `probe_register_limit.py` 当时**固定用一个域名**做每一发，而**域名阈值只有
-  2~3** ⇒ 那个突发**先撞上的是域名维度**，测到的很可能是**域名维度的聚合**，
-  而不是 IP 维度的阈值。
+🔴 **旧结论 ">45 分钟" 的**依据**不成立**：它来自**连续打点**的探针，每 30s
+对同一个出口打一枪。如果**被拒的那一枪也计数**（服务端回了限流，说明它收到了），
+那每次探测都在给窗口**续命** —— "一直 400"只能证明"你一直在打它"，
+**不能**反推窗口长度。这个陷阱现在写进了
+`tools/probes/probe_window_limits.py` 的模块 docstring。
 
-  ⚠ 两条限流消息**格式相同**（都是 `Too many registration attempts from this
-  IP / from this email domain`，只有中间一个词不同），所以**只看消息很容易
-  分不出是哪一维** —— 这正是当时没发现的原因。
+⚠ 但 ">45 分钟" 这个**数字本身被证实了**：2026-10-18 的受控复测在
+**45.37 分钟仍被限流**（见下）⇒ 它是**下界**，不是被推翻。所以默认窗口
+**保持** 3600s 附近（60 分钟），但只比下界多 ~15 分钟余量；要绝对安全就调到
+5400s+（代价是吞吐）。
 
-  ⇒ 探针已修：现在**轮换域名**（不传 `--domain`），这样
-  `域名数 × 2~3` 发之内不会撞域名维度，更早被拦就是 IP 维度。
-  传 `--domain` 锁一个域名时它会**明确警告"这测的是域名维度"**。
-  **IP 维度的阈值仍然未测准。**
+#### 台账反推：**恢复间隔**，不是窗口长度（零窗口代价）
 
-### 未测（**不要当结论用**）
+`tools/ops/analyze_window_recovery.py` 从 2026-10-13~17 的台账里挖出
+"某维度在 T 被限流 → 同一维度下一次发码成功在 T+Δ"的样本：
 
-- **窗口长度**：只知道 **>45 分钟**。可能是 1 小时 / 按天。
-  这也是 `.env` 里 `AR_REGISTER_WINDOW_S` 默认取保守值（**3600s**）的原因。
+| 维度 | 样本 | 最短恢复间隔 | 说明 |
+| --- | --- | --- | --- |
+| IP（按出口） | 2 | 14.88 分钟 | 同一出口被 IP 限流 → 14.88 分钟后发码成功 |
+| 域名（同出口） | 3 | 14.88 分钟 | 同一域名 + 同一出口的失败 → 成功 |
+| 域名（跨出口） | 11（其中 2 条 <60s） | 0.5s / 7.9s | A 出口刚被限流、B 出口立刻成功 ⇒ 不是严格全局计数 |
 
-> 🔴 **窗口长度这条事实的唯一真源就是本节。** `common/config.py` 与
+🔴 **不要把 14.88 分钟读成窗口长度。** 它只说明"到那时计数已低于阈值"
+（恢复间隔），而受控复测在 **16.14 分钟仍被域名限流** ⇒ 14.88 分钟**不是**
+窗口上界。原因：失败那一枪是否计数、注册请求是否也计数、阈值是多少，
+都会改变"多久才降到阈值以下"。
+
+#### 受控实测：域名阈值 ≈10，且**跨出口计数**
+
+2026-10-18，`probe_window_limits.py --mode burst` 在一个**全新域名**
+（`own2.example`）上、用 **10 个不同出口**连打（约 5 分钟）：
+
+```text
+#1 .. #9   200 {"code":200,"message":"ok"}
+#10        400 Too many registration attempts from this email domain
+```
+
+⇒ **域名阈值 ≈10 次/窗口**（不是旧写的 2~3），且**不同出口一起计数**
+⇒ 域名窗口的计数是**全局**的（换出口解决不了）。
+
+🔴 **两次独立复测**（`own2.example` 与 `zeppost.com`，都是全新域名）
+都是"前 9 枪过、第 10 枪域名限流" ⇒ 阈值 ≈10 不是单次巧合。
+
+⚠ 同一天还测了两个反例：
+
+- 同一域名、**不同出口**打 3 枪：全过；
+- 同一域名、**同一出口**打 3 枪：也全过。
+
+⇒ 阈值不是 2~3（旧文档把**本地配置**当成了服务端阈值）。
+
+#### 受控实测：IP 阈值 ≈4（旧 "~16" 是域名维度污染出来的假数）
+
+同一天，在**同一个出口**上连打 `smailr.example`：前 4 枪 `200 ok`，**第 5 枪**
+`400 Too many registration attempts from this IP` ⇒ **IP 阈值 ≈4 次/窗口**。
+
+🔴 这条推翻旧注释里的 "一次 ~16 连发即触发"：那次突发**固定用一个域名**，
+先撞的是域名维度（旧文档又把本地默认 2~3 当成服务端阈值）⇒ "~16" 是
+**域名维度的聚合**，不是 IP 阈值。实际 IP 阈值只有 ~4。
+
+⚠ 这也是"子域测试只能用跨出口"的原因：IP 阈值（≈4）< 域名阈值（≈10），
+**同一个出口根本打不满域名窗口**。但域名计数是全局的（10 个不同出口一起
+计数），所以跨出口的子域测试仍然有效。
+
+⚠ 但"单一 10 次/滑动窗口"也**不成立**：
+
+- 在 `own.example` 上，43 分钟前有 3 枪（01:38），随后 02:18~02:22 又打
+  6 枪全过、第 7 枪被域名限流。如果窗口是"10 次/滑动窗口"且阈值 10，
+  这只能是那 3 枪**仍在窗口里**（⇒ W ≥ 43 分钟）。
+- 可台账里同一域名在 02:17 被限流、02:32（15 分钟后）就发码成功了。
+
+两者不可能同时由**单一滑动窗口**解释 ⇒ 更像**多级限流**（短时突发 + 长时
+持续）或**令牌桶**，而不是"10 次 / 固定窗口"。
+
+⚠ 那 2 条 **0.5s / 7.9s 的跨出口成功**也说明它不是严格一致的全局计数器
+—— 更像 CF 边缘的**最终一致**限流。所以本地闸门按全局域名分桶仍然是对的
+（保守方向），但不能指望它和服务端逐秒对齐。
+
+#### 受控实测：窗口恢复（单次触碰）
+
+`--mode recovery` 的设计是：打满 → **静默 wait 秒（一枪都不打）** → 只探一枪。
+2026-10-18 在 `own2.example` 上打满后静默 15 分钟：
+
+```text
+01:59:34  打满（第 1 枪就确认域名限流）
+02:15:42  探测：仍是 400 Too many registration attempts from this email domain
+          ⇒ 距打满 16.14 分钟，**W > 16.14 分钟**
+```
+
+⇒ **窗口长度 > 16.14 分钟**（下界）。"≤14.88 分钟" 那个台账数字是恢复间隔，
+不是窗口长度。
+
+**45 分钟复测**（`zeppost.com`，02:31:08 打满 → 03:16:30 探测）：
+
+```text
+03:16:30  400 Too many registration attempts from this email domain
+          ⇒ 距打满 45.37 分钟，**W > 45.37 分钟**
+```
+
+⇒ **窗口长度 > 45.37 分钟**。旧的 ">45 分钟" 因此**被证实为下界**；
+上界仍然未知（可能是 1 小时 / 2 小时 / 按天）。
+
+#### 仍然未测准（**不要当结论用**）
+
+- **窗口长度的上界**：只知道 **>45.37 分钟**（两次受控复测：16.14 分钟、
+  45.37 分钟都仍限流）。要收窄就换域名、用更大的 `--wait` 再跑（每次
+  **只探一枪**）；在测出上界之前，`AR_*_WINDOW_S=3600` 只有 ~15 分钟余量，
+  要绝对安全就调到 5400s+。
+- **是不是多级限流**：`own.example` 的"3 枪 43 分钟后仍算数"与台账的
+  "15 分钟就恢复"互相矛盾 ⇒ 很可能是**短时突发 + 长时持续**两级，但具体
+  分界与容量都没测。
+- **IP 阈值**：已测到 **≈4**（同一出口 4 枪过、第 5 枪 IP 限流），但只有
+  一次样本；是否也是多级 / 是否按 IP+域名 分桶仍未测。
+- **是否按 IP+UA / IP+指纹**：只用过一个 UA，没做对照实验。
+- **成功注册是否也占用额外计数**：未测。
+
+**怎么复现**：
+
+```bash
+python tools/ops/analyze_window_recovery.py            # 零成本，先看台账恢复间隔
+python tools/probes/probe_window_limits.py --mode plan # 零请求，看成本
+python tools/probes/probe_window_limits.py --mode burst --domain <新域名> --fill 12
+python tools/probes/probe_window_limits.py --mode recovery --domain <新域名> --wait 2700
+python tools/probes/probe_window_limits.py --mode subdomain --parent <父域> --child <子域> --fill 12
+```
+
+> 🔴 **窗口长度这条事实的唯一真源就是本节。** `common/config/` 与
 > `README.md` 只**引用**它、不另写数字 —— 同一份知识写两处必然漂移
 > （本项目实际漂移过：一处 `>4 分钟`、一处 `>45 分钟`、一处默认 `600s`）。
-
-- **阈值 N**：不知道是“N 次/窗口”还是令牌桶（我们的探测本身可能**续命**窗口，
-  所以"探测期间一直 400"不能反推窗口长度）。
-- **是否按 IP+UA / IP+指纹**：只用过一个 UA，没做对照实验。
-- **成功注册是否也占用额外计数**：观测到"2 次发码 + 1 次成功注册"之后就被拦，
-  但也可能是那之前的其它请求累积的。
-
-**要测准它**：用 `tools/probes/probe_register_limit.py`，并且
-**在探测之间不要发任何其它注册类请求**（否则会污染结论）。
 
 ---
 
@@ -363,7 +633,8 @@ POST https://apihub.agnes-ai.com/v1/chat/completions {"model":"agnes-2.5-flash",
 
 **撞到限流时的第一步是换出口，不是原地等**（`_rotate_slot`）。换不动
 （没配池子 / 只有 1 个出口 / 别的都占着）才退避重试，且退避**封顶 45s** ——
-窗口长度未知，按账号等满一个窗口会把批量拖死。
+窗口长度未测准（受控实测 **>45.37 分钟**；旧 ">45 分钟" 是下界），
+按账号等满一个窗口会把批量拖死。
 
 ### 出口健康：看**失败率 + 样本量**，不要看失败数
 

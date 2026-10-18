@@ -14,12 +14,12 @@
 并行化**，而不是被串行地加在关键路径上。
 
 ⚠ 与 Intern-Register-Tool 的**关键差异**：那边分两段的根本理由是"浏览器很贵"。
-**本项目零浏览器**（整条链路纯 HTTP），所以这里的拆分理由是 **I/O 等待的形状
-不同**（等外部 SMTP vs. 打站点 API），不是资源稀缺 —— 这个结论**不因 captcha
-而改变**。
-🔴 ⚠ 但 **2026-10-15 16:24 起 ②发验证码 要求 captcha**（`400 Captcha
-   verification is required`）⇒ "零浏览器"这条前提当前**不成立**：生产者段会在
-   `send_code` 上以 `rejected` 失败。见 `docs/protocol.md` §2②。
+**captcha 是发码前的一个独立步骤**（`src/captcha.py`，默认 headless），所以这里
+的拆分理由仍然是 **I/O 等待的形状不同**（等外部 SMTP vs. 打站点 API），不是
+资源稀缺。
+🔴 2026-10-15 16:24 起 ②发验证码 要求 captcha（`400 Captcha verification is
+   required`）⇒ 生产者段会先调 captcha provider 拿 `ticket`/`randstr`，再发码。
+   provider 失败归 `captcha`（不是 `rejected`）。见 `docs/protocol.md` §2②。
 
 为什么"注册尝试"要按出口限速
 ----------------------------
@@ -43,6 +43,7 @@ Agnes 实测有一层**按 IP 的注册尝试限流**，覆盖 `/api/verificatio
 | `"network"` | 网络 / 超时 / 5xx | 异常 |
 | `"mail"` | 邮箱侧（建地址失败 / 读信读不出来） | 异常 |
 | `"verify"` | 推理网关侧校验失败（非致命，账号本身仍算成功） | 网关响应 |
+| `"captcha"` | captcha 求解失败（本地）：依赖缺失 / 浏览器超时 / 答案被拒 | 本地 provider |
 
 🔴 **读点只认字段**（`error_kind_of`）：字段非空即权威，只有字段为空时才退化成
 文本匹配（给手工构造的老记录兜底）。Intern-Register-Tool 的教训是：靠自己拼的
@@ -52,7 +53,10 @@ Agnes 实测有一层**按 IP 的注册尝试限流**，覆盖 `/api/verificatio
 # 🔴 本文件**只做转出**：`from src.pipeline import X` 的既有写法全部保持不变。
 #    实现按职责分在下面几个子模块里（每个只讲一件事）：
 #
-#      limiter.py    本地闸门：滑动窗口 / 域名预留 / 限流器工厂 / 换出口
+#      limiter.py    本地闸门**转出层**（window / reservation / registry）
+#      window.py     滑动窗口原语（SlidingWindow / WindowBusy）
+#      reservation.py 域名预留（DomainReservation）
+#      registry.py   限流器工厂 + 按维度挑桶 + 换出口
 #      record.py     记录与分类：AccountRecord / Ticket / classify / STAGES
 #      provision.py  生产者段：建邮箱 → 发码 → 等码
 #      finish.py     消费者段：注册 → 登录 → 建 Key → 只读校验
@@ -73,12 +77,14 @@ from .. import apikey as _apikey
 from .. import quota as _quota
 from .. import windowstore as _windows
 from ..agnes import (
+    ERR_CAPTCHA,
     ERR_MAIL,
     ERR_NETWORK,
     ERR_QUOTA,
     ERR_QUOTA_GUARD,
     ERR_REJECTED,
     ERR_VERIFY,
+    AgnesCaptcha,
     AgnesClient,
 )
 from ..proxypool import SlotPool, SlotPoolEmpty
@@ -126,6 +132,8 @@ __all__ = [
     "ERR_NETWORK",
     "ERR_MAIL",
     "ERR_VERIFY",
+    "ERR_CAPTCHA",
+    "AgnesCaptcha",
     "WindowBusy",
     "AccountRecord",
     "error_kind_of",

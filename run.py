@@ -23,9 +23,9 @@
     且**不要**把它当临时文件清掉 —— 定期把 `ledger/` 另存一份到别处。
 
 关于 --workers / --producers：
-  **本项目零浏览器**（整条链路纯 HTTP）—— ⚠ 但 **2026-10-15 16:24 起 ②发验证码
-  要求 captcha**（`400 Captcha verification is required`），那一枪会直接失败，
-  链路在此断掉（见 `docs/protocol.md` §2②）。在此之前，并发只受两件事约束：
+  🔴 2026-10-15 16:24 起 ②发验证码 要求 captcha；主流水线默认会启一个
+  **headless Chromium** 解点选（`src/captcha.py`，`AR_CAPTCHA_ENABLED` 默认开），
+  再把 ticket/randstr 交给发码请求。并发仍受两件事约束：
   邮箱 Worker（建地址 + 收信轮询）和 **Agnes 按 IP 的注册尝试限流**
   （`/api/verification` + `/api/user/register`）。
 
@@ -143,6 +143,19 @@ def main(argv=None):
     for warning in config.lint():
         print(f"  ⚠ 配置提醒：{warning}", flush=True)
 
+    # ── captcha 状态（默认开、headless）──────────────────────
+    if config.CAPTCHA_ENABLED:
+        print(
+            f"captcha：已启用（{'headless' if config.CAPTCHA_HEADLESS else 'headed'}，"
+            f"{config.CAPTCHA_TIMEOUT_S}s 超时）",
+            flush=True,
+        )
+    else:
+        print(
+            "captcha：已禁用（AR_CAPTCHA_ENABLED=0）—— 发码会被服务端 400 拒绝",
+            flush=True,
+        )
+
     # ── 台账读源：**在任何请求之前**读好 ──────────────────────
     # 🔴 为什么放在这里（跑批之前），而不是留到落盘阶段：读源损坏时落盘会失败，
     #    而那时**整批请求已经花掉了** —— 服务端的注册窗口是本工具最贵的资源。
@@ -227,6 +240,38 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return 6
+
+    # ── captcha 能力自查（紧跟链路预检；**不消耗注册窗口**）─────────
+    # 🔴 为什么值得单独一步：captcha provider 的常见故障是**本机**问题
+    #    （Playwright 浏览器版本不匹配 / 依赖缺失 / 页面打不开），与出口质量无关。
+    #    实测踩过：5 批全失败且报 `[network]`，看起来像代理坏了 —— 实际是
+    #    `python -m playwright install chromium` 没跑。
+    #    `solve()` 会拦掉前端的发码请求，所以这一步只打 TCaptcha 端点。
+    if args.preflight and config.CAPTCHA_ENABLED:
+        from src import captcha as _captcha
+
+        _provider = _captcha.default_provider()
+        if _provider is None:
+            print("  ⚠ captcha 已启用但造不出 provider", file=sys.stderr)
+            return 6
+        _probe_domain = (config.mail_domains() or ["example.com"])[0]
+        _probe_email = f"probe{int(time.time())}@{_probe_domain}"
+        _t_cap = time.time()
+        try:
+            _provider.solve(_probe_email, proxy=None)
+        except Exception as ex:  # noqa: BLE001
+            print(f"✗ captcha 自查失败：{type(ex).__name__}: {ex}", file=sys.stderr)
+            print(
+                "  这是**本机**能力问题（不是出口）：已中止，**未发出任何注册请求**。",
+                file=sys.stderr,
+            )
+            print(
+                "  修法：python -m playwright install chromium"
+                "（或 AR_CAPTCHA_ENABLED=0，但那样发码会被服务端拒）。",
+                file=sys.stderr,
+            )
+            return 6
+        print(f"  ✓ captcha 自查通过（{time.time() - _t_cap:.1f}s）", flush=True)
 
     t0 = time.time()
     results = run_batch(

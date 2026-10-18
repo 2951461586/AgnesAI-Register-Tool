@@ -13,6 +13,7 @@
 """
 
 from common import config
+from common.config import mail as config_mail
 from src import mailbox
 from src.catchmail import CatchMailClient
 from src.mailbox import MailboxSource
@@ -101,9 +102,9 @@ def test_enabled_sources_gate_the_domain_pool(monkeypatch):
     ⚠ 用 `_real_mail_domains`（模块加载时抓的真实现），因为 fixture 会把
       `config.mail_domains` 换成固定值来隔离宿主 `.env`。
     """
-    monkeypatch.setattr(config, "MAIL_SOURCES", ["worker"])
+    monkeypatch.setattr(config_mail, "MAIL_SOURCES", ["worker"])
     assert all(d not in config.CATCHMAIL_DOMAINS for d in _real_mail_domains())
-    monkeypatch.setattr(config, "MAIL_SOURCES", ["worker", "catchmail"])
+    monkeypatch.setattr(config_mail, "MAIL_SOURCES", ["worker", "catchmail"])
     for d in config.CATCHMAIL_DOMAINS:
         assert d in _real_mail_domains()
 
@@ -114,6 +115,6 @@ def test_catchmail_source_needs_no_credentials(monkeypatch):
     ⚠ 无条件要求它们会让人以为"必须填"，而那是假话 —— 而假话会让用户
       去配一堆用不上的东西。
     """
-    monkeypatch.setattr(config, "MAIL_SOURCES", ["catchmail"])
+    monkeypatch.setattr(config_mail, "MAIL_SOURCES", ["catchmail"])
     bad = [x for x in config.validate() if x.startswith("AR_WORKER_")]
     assert bad == [], bad

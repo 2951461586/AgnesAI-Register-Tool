@@ -32,7 +32,7 @@ Intern-Register-Tool 实测过：本机开着 Clash TUN 时，连一个**不可�
 
 ⚠ SOCKS5 代理必须写 `socks5h://`（**远端**解析 DNS）。写 `socks5://` 时本地
   DNS 被 Clash 劫持会得到 fake-IP（`198.18.x.x`）并报 `0x04 Host unreachable`
-  —— 详见 `common/config.py` 的出口代理注释。
+  —— 详见 `common/config/proxy.py` 的出口代理注释。
 """
 
 import argparse

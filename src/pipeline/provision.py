@@ -13,7 +13,7 @@ import time
 
 from common import config
 
-from ..agnes import AgnesClient, AgnesError, AgnesQuota, AgnesRejected
+from ..agnes import AgnesCaptcha, AgnesClient, AgnesError, AgnesQuota, AgnesRejected
 from ..tempmail import now_ms
 from .limiter import (
     WindowBusy,
@@ -28,6 +28,23 @@ from .limiter import (
 from .record import Ticket, _print, make_password
 
 
+def _create_mailbox(mail, domain: str, rec, t0: float) -> str:
+    """建一个收信地址并做**元素级**校验。返回地址（非法则空串）。
+
+    🔴 必须校验**元素**，不能只查 `if not emails`：Worker 在异常路径下会返回
+      **列表非空但元素是空串**（`[""]`）。空收件人等于**不设限**
+      （`GET /api/inbox?email=`），可能抽到**别人邮件的验证码**。
+    ⚠ 不能写成 `str(emails[0]).strip()`：`None` 会变成字符串 `"None"`
+      —— 一个**看着合法**的假地址，比空串更难查。
+    """
+    emails = mail.create_mailbox(domain, 1)
+    first = emails[0] if emails else None
+    address = first.strip() if isinstance(first, str) else ""
+    if address and not rec.timings.get("mailbox_ms"):
+        rec.timings["mailbox_ms"] = int((time.time() - t0) * 1000)
+    return address
+
+
 # ── 生产者：建邮箱 → 发验证码 → 等码 ──────────────────────────────
 def provision(
     ticket: Ticket,
@@ -36,6 +53,7 @@ def provision(
     mail_domain: str | None = None,
     slot_pool=None,
     client_factory=None,
+    captcha=None,
     log=_print,
 ) -> Ticket:
     """跑完生产者那一段。成功返回 `ticket`；失败**抛异常**（由调用方打标）。
@@ -78,6 +96,11 @@ def provision(
     # 真正**发出去了几枪**验证码请求。`for…else` 的收尾靠它区分
     # "没试过"（`skipped`）与"试过了不行"（`failed`）—— 见 else 分支。
     sent_attempts = 0
+    # captcha 阶段已换过几次出口。
+    # 🔴 单独计数并**只允许换一次**（不是“用光 REGISTER_RETRIES”）：
+    #    换出口能治的是“链路坏 / 图没到”，治不了“字形认错”（那种换几个出口
+    #    都一样错）。每个出口 45s，最多 2 个出口就止损。
+    cap_rotations = 0
     t1 = time.time()
     for attempt in range(config.REGISTER_RETRIES + 1):
         # ── IP 维度（按出口）：只要 1 格 ───────────────────────────
@@ -148,43 +171,80 @@ def provision(
         # 🔴 客户端**跟着域名取**：域名可能刚从另一个源换过来。
         mail = mail_for(domain)
         rec.enter("mailbox")
-        emails = mail.create_mailbox(domain, 1)
-        # 🔴 必须校验**元素**，不能只查 `if not emails`。
-        #    Worker 在异常路径下会返回**列表非空但元素是空串**（`[""]`）——
-        #    只查列表的话空地址会一路走下去，后果比"报错点偏远"严重得多：
-        #      · 收信是按**收件人**过滤的（`GET /api/inbox?email=`），空收件人
-        #        等于**不设限** ⇒ 可能抽到**别人邮件的验证码**，把别人的地址
-        #        当成自己的账号注册掉；
-        #      · 日志表现为"邮箱+验证码就绪"但邮箱位是空的（实测见过）。
-        #    ⚠ 不能写成 `str(emails[0]).strip()`：`None` 会变成字符串 `"None"`
-        #      —— 一个**看着合法**的假地址，比空串更难查。
-        first = emails[0] if emails else None
-        address = first.strip() if isinstance(first, str) else ""
-        if not address:
-            raise AgnesRejected(
-                f"邮箱源没返回有效地址（{config.source_of(domain)} 的 create_mailbox "
-                f"返回 {emails!r}）",
-                code="NO_MAILBOX",
-            )
-        rec.email = address
-        rec.mail_domain = domain
-        # 🔴 记下"这个邮箱是**领来的**还是新建的" —— 清理阶段靠它决定删不删：
-        #    复用的邮箱是**用户预先建好的池子**，删了下一个账号就没得用；
-        #    而删新建的是对的（smailr 有 100 个邮箱上限）。
-        rec.mail_reused = bool(getattr(mail, "reused", False))
-        # 🔴 记下**新建**的每一个地址：换域名会**重建邮箱**（域名是地址的一部分），
-        #    所以一条账号可能建过好几个。只留最后一个会让**中间**那些静默泄漏
-        #    （清理只看 `email`）。
-        #    ⚠ 复用的**不进列表** —— 那是用户预先建好的池子（见 `cleanup_settled`）。
-        if address and not rec.mail_reused and address not in rec.mailboxes_created:
-            rec.mailboxes_created.append(address)
-        if not rec.timings.get("mailbox_ms"):
-            rec.timings["mailbox_ms"] = int((time.time() - t0) * 1000)
-        rec.mark_ok("mailbox")
+        # 🔴 **重试时复用已有邮箱**（B1，实测浪费）：`continue` 会回到循环头，
+        #    而邮箱地址在**同一个域名**下是仍然有效的 —— 但老代码每次都
+        #    `create_mailbox`，于是 captcha 失败重解 / 限流重试都会**多建一个地址**：
+        #      · 浪费 smailr 的 100 个邮箱额度（它会真删，但建也占额）；
+        #      · 往台账 `mailboxes_created` 里塞一堆没用过的地址。
+        #    只有**换域名**才必须重建（域名是地址的一部分）。
+        reuse = bool(rec.email) and rec.mail_domain == domain
+        if reuse:
+            address = rec.email
+            rec.mark_ok("mailbox", "reused")
+        else:
+            address = _create_mailbox(mail, domain, rec, t0)
+            if not address:
+                raise AgnesRejected(
+                    f"邮箱源没返回有效地址（{config.source_of(domain)} 的 create_mailbox "
+                    f"返回了空地址）",
+                    code="NO_MAILBOX",
+                )
+            rec.email = address
+            rec.mail_domain = domain
+            rec.mail_reused = bool(getattr(mail, "reused", False))
+            if not rec.mail_reused and address not in rec.mailboxes_created:
+                rec.mailboxes_created.append(address)
+            rec.mark_ok("mailbox")
 
         # ── 发验证码（写请求，两个维度的窗口都消耗）───────────────
         rec.enter("code")
         sent_at = now_ms()
+        # ── captcha：在**写请求之前**解出 ticket/randstr ──────────
+        # 🔴 放在 `reservation.consume()` **之前**：captcha 失败时这一枪
+        #    根本没发出去，那一格域名/IP 预留不该被扣掉（由调用方释放）。
+        # 🔴 放在循环**里面**：ticket 是一次性的，`send_code` 被限流后重试
+        #    必须重新解一张，不能复用上一张。
+        cap_ticket = cap_randstr = None
+        if captcha is not None:
+            # 🔴 **同出口重解**（`AR_CAPTCHA_RESOLVE_ATTEMPTS`，默认 2 = 重解 1 次）：
+            #    实测定单次成功率 ~50%，而失败与出口**无关**（直连/代理一样，
+            #    失败都是 errorCode=50）⇒ 「再拿一张新题」比「换出口等 45s 超时」划算。
+            last_cap_ex: AgnesCaptcha | None = None
+            for cap_try in range(config.CAPTCHA_RESOLVE_ATTEMPTS):
+                t_cap = time.time()
+                try:
+                    cap_ticket, cap_randstr = captcha.solve(
+                        rec.email,
+                        # 🔴 默认**直连**（实测：快一倍，成功率一样，uip 不一致不被拒）。
+                        #    要强绑同一出口就设 AR_CAPTCHA_USE_PROXY=1。
+                        proxy=ticket.proxy if config.CAPTCHA_USE_PROXY else None,
+                    )
+                except AgnesCaptcha as ex:
+                    last_cap_ex = ex
+                    if cap_try + 1 < config.CAPTCHA_RESOLVE_ATTEMPTS:
+                        log(f"captcha 失败（第 {cap_try + 1} 次）→ 同出口重解：{ex}")
+                finally:
+                    # 🔴 累计计时（多次尝试的**总** captcha 成本），不要覆盖 ——
+                    #    报告里那个数就该回答“这条账号在 captcha 上花了多久”。
+                    rec.timings["captcha_ms"] = rec.timings.get("captcha_ms", 0) + int(
+                        (time.time() - t_cap) * 1000
+                    )
+                if cap_ticket is not None:
+                    break
+            if cap_ticket is None:
+                # 重解用完了还不成 ⇒ 换出口再赌一次（可能是链路坏，不是题难）。
+                old = ticket.proxy
+                if cap_rotations < 1 and _rotate_slot(
+                    slot_pool, ticket, error=f"captcha: {last_cap_ex}"
+                ):
+                    cap_rotations += 1
+                    rotated_slots.append(old or "(直连)")
+                    ticket.client = client_factory(ticket.proxy)
+                    log(f"captcha 重解耗尽 → 换出口重试（{last_cap_ex}）")
+                    continue
+                raise last_cap_ex or AgnesCaptcha("captcha 未知失败")
+            log(f"  captcha 就绪（{rec.timings['captcha_ms']}ms）")
+
         # 🔴 这一枪**即将发出** ⇒ 先把预留扣掉，而且必须扣在**调用之前**。
         #
         #    "成功后扣"是不够的：网络层失败（`RemoteDisconnected` / `SSLEOFError`）
@@ -199,7 +259,7 @@ def provision(
         #    `SSLEOFError`）的请求**可能已经落地** —— 那也算"发出去了"。
         sent_attempts += 1
         try:
-            ticket.client.send_code(rec.email)
+            ticket.client.send_code(rec.email, ticket=cap_ticket, randstr=cap_randstr)
         except AgnesQuota as ex:
             if attempt >= config.REGISTER_RETRIES:
                 raise

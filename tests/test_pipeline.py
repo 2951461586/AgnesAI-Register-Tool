@@ -48,9 +48,11 @@ class FakeClient:
         self.key_error = key_error
         self.jwt = "jwt-1"
         self.calls = []
+        self.last_captcha = None
 
-    def send_code(self, email, purpose="register"):
+    def send_code(self, email, purpose="register", *, ticket=None, randstr=None):
         self.calls.append("send_code")
+        self.last_captcha = (ticket, randstr)
         if self.send_error:
             raise self.send_error
         return {"code": 200}
