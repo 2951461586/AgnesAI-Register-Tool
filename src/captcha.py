@@ -25,11 +25,13 @@ Playwright / numpy / scipy / Pillow 是**可选依赖**（`pyproject.toml` 的
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import json
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -202,6 +204,76 @@ def _click_points(page: Any, frame: Any, points, size_2d) -> None:
     btn.click()
 
 
+_TLS = threading.local()
+
+
+class _BrowserSession:
+    """一个线程独占的 Playwright 实例 + 浏览器。"""
+
+    __slots__ = ("pw", "browser")
+
+    def __init__(self, pw: Any, browser: Any) -> None:
+        self.pw = pw
+        self.browser = browser
+
+
+def _browser_session(headless: bool) -> _BrowserSession:
+    """取**当前线程**的浏览器会话（没有就起一个）。
+
+    🔴 Playwright 的 sync API **不是线程安全的**，而且 `sync_playwright()`
+      必须与使用它的线程同生共死 —— 会话只能 thread-local。
+      复用的是“每次 solve 都重开浏览器”的那 1~2s（实测启动+关闭成本）。
+    """
+    sess = getattr(_TLS, "session", None)
+    if sess is not None:
+        return sess
+    try:
+        from playwright.sync_api import sync_playwright  # pyright: ignore[reportMissingImports]
+    except ImportError as ex:  # pragma: no cover - 依赖缺失路径
+        raise AgnesCaptcha(
+            "captcha provider 需要 Playwright；装 `pip install -e .[captcha]` 或设 AR_CAPTCHA_ENABLED=0"
+        ) from ex
+    pw = sync_playwright().start()
+    try:
+        browser = pw.chromium.launch(
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+    except Exception:
+        pw.stop()
+        raise
+    sess = _BrowserSession(pw, browser)
+    _TLS.session = sess
+    return sess
+
+
+def _close_thread_session() -> None:
+    """关掉**当前线程**的浏览器会话（幂等）。"""
+    sess = getattr(_TLS, "session", None)
+    if sess is None:
+        return
+    _TLS.session = None
+    try:
+        sess.browser.close()
+    finally:
+        sess.pw.stop()
+
+
+@contextlib.contextmanager
+def _browser(headless: bool):
+    """借出 thread-local 浏览器；只在它已经崩了时丢弃会话。"""
+    sess = _browser_session(headless)
+    try:
+        yield sess.browser
+    finally:
+        try:
+            alive = bool(sess.browser.is_connected())
+        except Exception:  # noqa: BLE001
+            alive = False
+        if not alive:
+            _close_thread_session()
+
+
 @dataclass
 class TCaptchaProvider:
     """headless 浏览器 + 点选 solver。
@@ -235,25 +307,14 @@ class TCaptchaProvider:
         raise last
 
     def _solve_once(self, email: str, *, proxy: str | None = None) -> tuple[str, str]:
-        try:
-            from playwright.sync_api import sync_playwright  # pyright: ignore[reportMissingImports]
-        except ImportError as ex:  # pragma: no cover - 依赖缺失路径
-            raise AgnesCaptcha(
-                "captcha provider 需要 Playwright；"
-                "装 `pip install -e .[captcha]` 或设 AR_CAPTCHA_ENABLED=0"
-            ) from ex
-
         # 用 importlib 而不是 `from .captcha_solver import ...`：这个模块的
         # 顶层 import 会拉 numpy/scipy/Pillow，必须在**真正要解图时**才加载。
         # （顺带避开 LSP 对「函数内相对 import」的陈旧索引误报。）
         solve_bytes = importlib.import_module(".captcha_solver", __package__).solve_bytes
 
         pw_proxy = _playwright_proxy(proxy)
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=self.headless,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+        with _browser(self.headless) as browser:
+            ctx = None
             try:
                 ctx = browser.new_context(
                     user_agent=_USER_AGENT,
@@ -281,7 +342,8 @@ class TCaptchaProvider:
                 page.route("**/api/verification*", lambda route: route.abort())
 
                 page.goto(self.entry_url, wait_until="domcontentloaded", timeout=45000)
-                page.wait_for_timeout(3000)
+                # 原来的固定 3000ms：改成等登录表单出现就往下走（通常 <1s）。
+                page.wait_for_selector("#email", timeout=15000)
 
                 # 切到注册 tab。🔴 必须等到**注册专属**字段出现 —— `#email`
                 #    登录表单也有，所以"fill(#email) 没报错"不能证明切过去了。
@@ -294,12 +356,12 @@ class TCaptchaProvider:
                         page.wait_for_selector("#confirmPassword", timeout=8000)
                         break
                     except Exception:  # noqa: BLE001
-                        page.wait_for_timeout(1500)
+                        page.wait_for_timeout(300)
                 else:
                     raise AgnesCaptcha("进不去注册表单（#confirmPassword 未出现）")
 
                 page.fill("#email", email)
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(200)
                 page.wait_for_selector('img[alt="can send"]', timeout=10000)
                 page.click('img[alt="can send"]', force=True, timeout=10000)
 
@@ -348,4 +410,13 @@ class TCaptchaProvider:
                     _save_debug_images(bg_bytes, sprite_bytes, points, meta, ex)
                     raise
             finally:
-                browser.close()
+                if ctx is not None:
+                    ctx.close()
+
+    def close_thread(self) -> None:
+        """释放**当前线程**的浏览器（生产者线程结束时调用）。
+
+        ⚠ Playwright 的 sync 对象只能在创建它的线程里关闭 —— 所以不能从
+          主线程统一收尾。`batch` 在每个生产者线程的 finally 里调这个。
+        """
+        _close_thread_session()

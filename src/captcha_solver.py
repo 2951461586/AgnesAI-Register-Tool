@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import io
 import math
-from typing import Any
+from typing import Any, cast
 
 from .agnes import AgnesCaptcha
 
@@ -28,8 +28,8 @@ try:
     import numpy as np  # pyright: ignore[reportMissingImports]
     from PIL import Image  # pyright: ignore[reportMissingImports]
     from scipy import ndimage as ndi  # pyright: ignore[reportMissingImports]
+    from scipy.fft import irfft2, next_fast_len, rfft2  # pyright: ignore[reportMissingImports]
     from scipy.optimize import linear_sum_assignment  # pyright: ignore[reportMissingImports]
-    from scipy.signal import fftconvolve  # pyright: ignore[reportMissingImports]
 except ImportError as ex:  # pragma: no cover - 只在没装 optional extra 时走到
     raise AgnesCaptcha(
         f"captcha solver 需要可选依赖（{ex.name}）；"
@@ -40,12 +40,24 @@ except ImportError as ex:  # pragma: no cover - 只在没装 optional extra 时�
 # 粗搜 / 细搜网格。🔴 live 实测：背景图标可能比提示图**小到 0.4×**，也可能被
 # **旋转 180°** —— 两个范围都必须覆盖。
 COARSE_SCALES = [round(x, 2) for x in np.arange(0.3, 2.3, 0.2)]
+# 🔴 P5 实测结论：把粗搜角度从 20° 改成 30°（18→12 个）在 16 张合成语料上
+#    命中率 **10/16 → 9/16**，24° 更差（8/16）⇒ **保持 20°**。
+#    收益换不来命中率，就不该拿。
 COARSE_ANGLES = list(range(-180, 180, 20))
 FINE_SCALE_RADIUS = 0.15
 FINE_SCALE_STEP = 0.05
 FINE_ANGLE_RADIUS = 10
 FINE_ANGLE_STEP = 5
 TOP_K = 4
+# P4：>= 这个尺度的图标在 **0.5× 背景**上粗搜（FFT 像素少 4×）。
+# 🔴 阈值是**实测**调的：0.6 起步会把命中率从 10/16 拉到 7/16，1.2 会丢一例，
+#    1.6 才做到“命中率不降 + 约 1.4× 提速”。半分辨率对中小图标太伤笔画。
+PYRAMID_MIN_SCALE = 1.6
+# P1：NCC 的数值范围很小（分子分母都是像素计数的组合），float32 足够。
+#     🔴 这是实测选择：float32 + 积分图 + 按形状缓存把 NCC 段提速 3.4~4.8×；
+#     float64 更“逐位一致”，但会吃掉其中约 1.6×。边界上一两像素的翻峰
+#     由语料对拍（1e-4 分差）兜住。
+NCC_DTYPE = np.float32
 # 尺度先验的权重：|log(模板尺寸 / 候选尺寸)| 的惩罚系数。
 # 🔴 0.25 是 3 张样本（HAR + 2 张 live 失败样本）上的最优值：
 #    0.15/0.2 不够（17:00 样本的 0.9× 假匹配会赢），0.3 会把正确的大图标
@@ -178,17 +190,82 @@ def find_candidates(
     return cands[:max_candidates]
 
 
-def _ncc_best(tpl: Any, cand: Any, scales, angles):
-    """在 cand 上滑窗匹配 tpl，返回 (score, scale, angle, (dy,dx), tpl_shape)。"""
-    best = (-2.0, None, None, None, None)
-    cf = cand.astype(np.float64)
+def _integral(a: Any) -> Any:
+    """二维前缀和（padding 1）。"""
+    return np.pad(a, ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+
+
+def _box_sum(ii: Any, h: int, w: int) -> Any:
+    """积分图上的 box sum（valid 区域）。"""
+    H = ii.shape[0] - 1
+    W = ii.shape[1] - 1
+    oh, ow = H - h + 1, W - w + 1
+    return ii[h : h + oh, w : w + ow] - ii[0:oh, w : w + ow] - ii[h : h + oh, 0:ow] + ii[0:oh, 0:ow]
+
+
+class _NccEngine:
+    """一个候选 crop 上的 NCC 计算器 —— 与模板形状无关的量只算一次。
+
+    🔴 原实现把 `cf*cf` / `ones` / `fftconvolve(cf, ones)` 放在 angle 循环里，
+      每个 (scale, angle) 都重算一遍：候选 crop 的 FFT 被重复了 ~180 次。
+      这里改成：
+        · `cf` / `cf²` / 积分图：构造时一次；
+        · `sc` / `scc`（只依赖旋转后模板的**形状**）：积分图 box sum，按形状缓存；
+        · 候选频谱 `rfft2(cf)`：按 FFT 尺寸缓存，等价 `fftconvolve(..., 'valid')`。
+    """
+
+    def __init__(self, cand: Any) -> None:
+        self.cf = cand.astype(NCC_DTYPE)
+        self.cf2 = self.cf * self.cf
+        self.H: int = int(self.cf.shape[0])
+        self.W: int = int(self.cf.shape[1])
+        self.ii = _integral(self.cf)
+        self.ii2 = _integral(self.cf2)
+        self._boxes: dict[tuple[int, int], tuple[Any, Any]] = {}
+        self._hats: dict[tuple[int, int], Any] = {}
+
+    def boxes(self, h: int, w: int) -> tuple[Any, Any]:
+        got = self._boxes.get((h, w))
+        if got is None:
+            got = (_box_sum(self.ii, h, w), _box_sum(self.ii2, h, w))
+            self._boxes[(h, w)] = got
+        return got
+
+    def corr_valid(self, tf: Any) -> Any:
+        """`fftconvolve(cf, tf[::-1,::-1], mode='valid')` 的等价实现。"""
+        th: int = int(tf.shape[0])
+        tw: int = int(tf.shape[1])
+        shape = (
+            cast(int, next_fast_len(self.H + th - 1)),
+            cast(int, next_fast_len(self.W + tw - 1)),
+        )
+        hat = cast(Any, self._hats.get(shape))
+        if hat is None:
+            hat = cast(Any, rfft2(self.cf, s=shape))
+            self._hats[shape] = hat
+        pad = np.zeros(shape, dtype=NCC_DTYPE)
+        pad[:th, :tw] = tf[::-1, ::-1]
+        full = cast(Any, irfft2(cast(Any, hat * cast(Any, rfft2(pad))), s=shape))
+        return full[th - 1 : self.H, tw - 1 : self.W]
+
+
+def _iter_ncc(engine: _NccEngine, tpl: Any, scales, angles, *, min_score: float = 0.0):
+    """按 scale/angle 网格产出 `(ncc, scale, angle, tpl_mask)`。
+
+    `min_score` 只用于**可证明无效**的剪枝：NCC 对给定 `(st, sc)` 有一个
+    解析上界 `u(st, sc)`，若 `u < min_score` 则这一枪不可能产生合格峰。
+    ⚠ 上界不是“模板比窗口密就为负”（那个推导漏了 `n`）：
+      `num <= n*min(st,sc) - st*sc`，在 `st > sc` 时是 `sc(n-st)`，
+      只要模板没有填满整个窗口（`st < n`）就**仍然为正**。
+    """
+    H, W = engine.H, engine.W
     for s in scales:
         tw = max(1, int(round(tpl.shape[1] * s)))
         th = max(1, int(round(tpl.shape[0] * s)))
         # 🔴 防止**极小模板**刷分：6×10 的模板能匹配任何暗块，NCC 还是高的。
         if tw < 12 or th < 12 or tw * th < 200:
             continue
-        if tw > cand.shape[1] or th > cand.shape[0]:
+        if tw > W or th > H:
             continue
         timg = Image.fromarray((tpl * 255).astype(np.uint8)).resize(
             (tw, th), Image.Resampling.NEAREST
@@ -196,68 +273,44 @@ def _ncc_best(tpl: Any, cand: Any, scales, angles):
         for a in angles:
             timg2 = timg.rotate(a, expand=True, resample=Image.Resampling.NEAREST) if a else timg
             tt = np.asarray(timg2) > 127
-            if tt.sum() < 10 or tt.shape[0] > cand.shape[0] or tt.shape[1] > cand.shape[1]:
+            if tt.shape[0] > H or tt.shape[1] > W:
                 continue
-            tf = tt.astype(np.float64)
-            n = tf.size
-            st = tf.sum()
-            stt = (tf * tf).sum()
-            ones = np.ones_like(tf)
-            sc = fftconvolve(cf, ones, mode="valid")
-            scc = fftconvolve(cf * cf, ones, mode="valid")
-            stc = fftconvolve(cf, tf[::-1, ::-1], mode="valid")
-            num = n * stc - st * sc
-            den = np.sqrt(np.maximum((n * stt - st * st) * (n * scc - sc * sc), 0.0))
-            with np.errstate(invalid="ignore", divide="ignore"):
-                ncc = np.where(den > 1e-9, num / den, -2.0)
-            idx = np.unravel_index(int(np.argmax(ncc)), ncc.shape)
-            score = float(ncc[idx])
-            if score > best[0]:
-                best = (score, s, a, idx, tt.shape)
-    return best
-
-
-def _ncc_peaks(
-    tpl: Any, cand: Any, scales, angles, *, k: int = 3, min_score: float = 0.25, nms_px: int = 20
-):
-    """返回 cand 上 tpl 的 top-K 局部峰值（跨 scale/angle）。
-
-    🔴 不能只取全局最优：正确匹配可能是**第二个峰** —— live 实测里 0.3× 的
-       小块假匹配分数更高，只保留全局最优会让细搜永远看不到正确位置。
-    """
-    cf = cand.astype(np.float64)
-    peaks = []
-    for s in scales:
-        tw = max(1, int(round(tpl.shape[1] * s)))
-        th = max(1, int(round(tpl.shape[0] * s)))
-        if tw < 12 or th < 12 or tw * th < 200:
-            continue
-        if tw > cand.shape[1] or th > cand.shape[0]:
-            continue
-        timg = Image.fromarray((tpl * 255).astype(np.uint8)).resize(
-            (tw, th), Image.Resampling.NEAREST
-        )
-        for a in angles:
-            timg2 = timg.rotate(a, expand=True, resample=Image.Resampling.NEAREST) if a else timg
-            tt = np.asarray(timg2) > 127
-            if tt.sum() < 10 or tt.shape[0] > cand.shape[0] or tt.shape[1] > cand.shape[1]:
+            st = int(tt.sum())
+            if st < 10:
                 continue
-            tf = tt.astype(np.float64)
-            n = tf.size
-            st = tf.sum()
-            stt = (tf * tf).sum()
-            ones = np.ones_like(tf)
-            sc = fftconvolve(cf, ones, mode="valid")
-            scc = fftconvolve(cf * cf, ones, mode="valid")
-            stc = fftconvolve(cf, tf[::-1, ::-1], mode="valid")
-            num = n * stc - st * sc
-            den = np.sqrt(np.maximum((n * stt - st * st) * (n * scc - sc * sc), 0.0))
+            sc, scc = engine.boxes(*tt.shape)
+            n = tt.size
+            if min_score > 0.0:
+                # 解析上界：对固定 st、sc，`stc <= min(st, sc)`；上界在 sc 离 st
+                # 最远时最大，所以只需看 sc 的两端。
+                sc_lo = float(sc.min())
+                sc_hi = float(sc.max())
+                if sc_hi > 0 and (st <= sc_lo or st >= sc_hi):
+                    sc_ref = sc_lo if st <= sc_lo else sc_hi
+                    if 0 < st < n and 0 < sc_ref < n:
+                        num = st * (n - sc_ref) if st <= sc_ref else sc_ref * (n - st)
+                        den = sc_ref * (n - st) if st <= sc_ref else st * (n - sc_ref)
+                        if num / den < min_score * min_score:
+                            continue
+            tf = tt.astype(NCC_DTYPE)
+            stt = float(st)
+            stc = engine.corr_valid(tf)
+            # 🔴 FFT 用 float32，但**归一化公式用 float64**：
+            #    `n*scc - sc*sc` 在“整个窗口几乎全黑”时会接近 0，
+            #    float32 的舍入会把 den 抹成 0 ⇒ 整张图冒出 -2.0 的洞。
+            #    这只是小幅数组运算，代价远小于 FFT。
+            stc64 = stc.astype(np.float64)
+            sc64 = sc.astype(np.float64)
+            scc64 = scc.astype(np.float64)
+            num = n * stc64 - st * sc64
+            den = np.sqrt(np.maximum((n * stt - st * st) * (n * scc64 - sc64 * sc64), 0.0))
             with np.errstate(invalid="ignore", divide="ignore"):
-                ncc = np.where(den > 1e-9, num / den, -2.0)
-            mx = ndi.maximum_filter(ncc, size=15)
-            ys, xs = np.nonzero((ncc == mx) & (ncc > min_score))
-            for y, x in zip(ys, xs, strict=True):
-                peaks.append((float(ncc[y, x]), s, a, (int(x), int(y)), tt.shape))
+                ncc = np.where(den > 1e-9, num / den, -2.0).astype(NCC_DTYPE)
+            yield ncc, s, a, tt
+
+
+def _select_peaks(peaks, k: int, nms_px: int):
+    """按分数取 top-K，并保证尺度多样 + NMS 去重。"""
     peaks.sort(key=lambda p: -p[0])
 
     def _dist2(p, o) -> float:
@@ -297,6 +350,54 @@ def _ncc_peaks(
             out.append(p)
     out.sort(key=lambda p: -p[0])
     return out
+
+
+def _ncc_best(tpl: Any, cand: Any, scales, angles):
+    """在 cand 上滑窗匹配 tpl，返回 (score, scale, angle, (dy,dx), tpl_shape)。"""
+    best = (-2.0, None, None, None, None)
+    engine = _NccEngine(cand)
+    for ncc, s, a, tt in _iter_ncc(engine, tpl, scales, angles):
+        idx = np.unravel_index(int(np.argmax(ncc)), ncc.shape)
+        score = float(ncc[idx])
+        if score > best[0]:
+            best = (score, s, a, idx, tt.shape)
+    return best
+
+
+def _ncc_peaks_engine(
+    engine: _NccEngine,
+    tpl: Any,
+    scales,
+    angles,
+    *,
+    k: int = 3,
+    min_score: float = 0.25,
+    nms_px: int = 20,
+):
+    """在**已有的**候选引擎上取 top-K 峰。
+
+    单独抽出来是为了让同一候选的 3 个图标共用候选频谱缓存。
+    """
+    peaks = []
+    for ncc, s, a, tt in _iter_ncc(engine, tpl, scales, angles, min_score=min_score):
+        mx = ndi.maximum_filter(ncc, size=15)
+        ys, xs = np.nonzero((ncc == mx) & (ncc > min_score))
+        for y, x in zip(ys, xs, strict=True):
+            peaks.append((float(ncc[y, x]), s, a, (int(x), int(y)), tt.shape))
+    return _select_peaks(peaks, k, nms_px)
+
+
+def _ncc_peaks(
+    tpl: Any, cand: Any, scales, angles, *, k: int = 3, min_score: float = 0.25, nms_px: int = 20
+):
+    """返回 cand 上 tpl 的 top-K 局部峰值（跨 scale/angle）。
+
+    🔴 不能只取全局最优：正确匹配可能是**第二个峰** —— live 实测里 0.3× 的
+       小块假匹配分数更高，只保留全局最优会让细搜永远看不到正确位置。
+    """
+    return _ncc_peaks_engine(
+        _NccEngine(cand), tpl, scales, angles, k=k, min_score=min_score, nms_px=nms_px
+    )
 
 
 def _crop(bg_mask: Any, cand: dict, pad: int):
@@ -499,6 +600,13 @@ def _snap_to_blob(cx: float, cy: float, cand: dict, bg_mask: Any):
     return (round(float(fx), 1), round(float(fy), 1)), reason
 
 
+def _downscale_mask(mask: Any, factor: int = 2) -> Any:
+    """2×2 max-pool（`any`）降采样：细笔画只要有一格暗就保留。"""
+    h = (mask.shape[0] // factor) * factor
+    w = (mask.shape[1] // factor) * factor
+    return mask[:h, :w].reshape(h // factor, factor, w // factor, factor).any(axis=(1, 3))
+
+
 def solve_arrays(
     bg_rgb: Any,
     sprite_rgb: Any,
@@ -521,12 +629,51 @@ def solve_arrays(
         raise AgnesCaptcha(f"背景图只找到 {len(cands)} 个候选，少于 {n} 个目标")
 
     # ── 粗搜：每个（图标, 候选）保留 top-K 峰 ──────────────────
+    # P4：大尺度在 0.5× 背景上搜（FFT 像素少 4×），小尺度留在全分辨率
+    #     （半分辨率会把 12px 下限吃掉；0.3~0.5× 正是小图标假匹配的来源）。
+    small_scales = [s for s in COARSE_SCALES if s < PYRAMID_MIN_SCALE]
+    big_scales = [s for s in COARSE_SCALES if s >= PYRAMID_MIN_SCALE]
+    half_mask = _downscale_mask(bg_mask) if big_scales else None
+    # 🔴 每个候选只建一份裁剪/引擎：3 个图标共用候选频谱缓存
+    #    （同尺寸的模板形状会命中同一份 `rfft2(cf)`）。
+    crops = [_crop(bg_mask, c, pad=pad) for c in cands]
+    engines = [_NccEngine(c[0]) for c in crops]
+    hcrops: list[tuple[Any, int, int]] = []
+    hengines: list[_NccEngine] = []
+    if half_mask is not None:
+        for cand in cands:
+            hcand = {
+                "x": cand["x"] // 2,
+                "y": cand["y"] // 2,
+                "w": max(1, cand["w"] // 2),
+                "h": max(1, cand["h"] // 2),
+                "cx": cand["cx"] / 2.0,
+                "cy": cand["cy"] / 2.0,
+            }
+            hcrops.append(_crop(half_mask, hcand, pad=pad // 2))
+        hengines = [_NccEngine(h[0]) for h in hcrops]
     coarse = np.full((len(icons), len(cands)), -2.0)
     coarse_peaks = {}
     for i, (_sx, _sy, tpl) in enumerate(icons):
-        for j, cand in enumerate(cands):
-            crop, ox, oy = _crop(bg_mask, cand, pad=pad)
-            peaks = _ncc_peaks(tpl, crop, COARSE_SCALES, COARSE_ANGLES, k=3)
+        for j, _cand in enumerate(cands):
+            crop, ox, oy = crops[j]
+            peaks = _ncc_peaks_engine(engines[j], tpl, small_scales, COARSE_ANGLES, k=3)
+            if half_mask is not None:
+                hcrop, _hx, _hy = hcrops[j]
+                # 半分辨率 → 全分辨率 crop 坐标（±1px 误差由细搜 ±50px 吸收）
+                for p in _ncc_peaks_engine(
+                    hengines[j], tpl, [s / 2 for s in big_scales], COARSE_ANGLES, k=3
+                ):
+                    peaks.append(
+                        (
+                            p[0],
+                            p[1] * 2,
+                            p[2],
+                            (p[3][0] * 2, p[3][1] * 2),
+                            (p[4][0] * 2, p[4][1] * 2),
+                        )
+                    )
+                peaks = _select_peaks(peaks, 3, 20)
             coarse_peaks[(i, j)] = [(p, ox, oy) for p in peaks]
             coarse[i, j] = peaks[0][0] if peaks else -2.0
 
@@ -547,6 +694,10 @@ def solve_arrays(
     fine_raw = np.full((len(icons), len(cands)), -2.0)
     fine_adj = np.full((len(icons), len(cands)), -2.0)
     fine_info = {}
+    # P2：形状指纹只在 `SHAPE_PRIOR_WEIGHT != 0` 时才算。默认为 0，
+    #     而 `_shape_distance` 一次要 ~1.6ms（骨架细化 + 洞/矩），
+    #     细搜里会跑上百次 —— 算了再乘 0 是纯浪费。
+    feats = [_shape_features(icon[2]) if SHAPE_PRIOR_WEIGHT else None for icon in icons]
     for i in range(len(icons)):
         # 🔴 top-K 取**两个排名的并集**：只看 coarse_adj 会漏掉“原始分最高”
         #    的正确候选（17:00 样本的城堡就是这样丢的）；只看原始分则会被小尺度
@@ -556,13 +707,13 @@ def solve_arrays(
             | set(np.argsort(-coarse_adj[i])[:top_k].tolist())
         )
         tpl = icons[i][2]
-        tpl_feat = _shape_features(tpl)
+        tpl_feat = feats[i]
         for j in order:
             j = int(j)
             if coarse[i, j] <= -1.5:
                 continue
             cand = cands[j]
-            crop, ox, oy = _crop(bg_mask, cand, pad=pad)
+            crop, ox, oy = crops[j]
             for p, _ox, _oy in coarse_peaks[(i, j)]:
                 _cscore, s_c, a_c, idx_c, shape_c = p
                 cx = idx_c[0] + shape_c[1] / 2.0
@@ -581,7 +732,11 @@ def solve_arrays(
                     continue
                 fine_raw[i, j] = max(fine_raw[i, j], score)
                 win = sub[idx[1] : idx[1] + shape[0], idx[0] : idx[0] + shape[1]]
-                sd = _shape_distance(tpl_feat, win)
+                sd = (
+                    _shape_distance(tpl_feat, win)
+                    if (SHAPE_PRIOR_WEIGHT and tpl_feat is not None)
+                    else 0.0
+                )
                 adj = _adjust(score, shape, cand) - SHAPE_PRIOR_WEIGHT * sd
                 if adj > fine_adj[i, j]:
                     fine_adj[i, j] = adj
@@ -600,10 +755,13 @@ def solve_arrays(
             continue
         (score, s, a, idx, shape), ox, oy = peaks[0]
         cand = cands[j]
-        tpl_feat = _shape_features(icons[i][2])
-        crop, _ox, _oy = _crop(bg_mask, cand, pad=pad)
+        crop, _ox, _oy = crops[j]
         win = crop[idx[1] : idx[1] + shape[0], idx[0] : idx[0] + shape[1]]
-        sd = _shape_distance(tpl_feat, win) if win.size else 3.0
+        sd = (
+            _shape_distance(feats[i], win)
+            if (SHAPE_PRIOR_WEIGHT and feats[i] is not None and win.size)
+            else 0.0
+        )
         fine_raw[i, j] = max(fine_raw[i, j], score)
         adj = _adjust(score, shape, cand) - SHAPE_PRIOR_WEIGHT * sd
         if adj > fine_adj[i, j]:

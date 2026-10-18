@@ -112,7 +112,7 @@ def run_batch(
         if rec.status != "skipped":
             _quota.record(rec.email, ok=(rec.status == "success"), note=rec.error_kind)
 
-    def producer(idx: int) -> None:
+    def _produce(idx: int) -> None:
         rec = AccountRecord()
         rec.created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # ① 本地闸门。**在发任何请求之前** —— 这就是 `quota_guard` 的判据。
@@ -201,6 +201,20 @@ def run_batch(
         )
         # 槽位**不在这里归还** —— 消费者还要用它做注册（限流是按出口的）。
         q.put(ticket)
+
+    def producer(idx: int) -> None:
+        """生产者线程入口 —— 在本线程收尾时关掉它的 captcha 浏览器。
+
+        🔴 Playwright 的 sync 对象只能在创建它的线程里关闭，所以清理不能
+          放到主线程统一做；这个 finally 是唯一的正确位置。
+          注入的假 provider 没有 `close_thread` 时自然跳过。
+        """
+        try:
+            _produce(idx)
+        finally:
+            close = getattr(captcha_provider, "close_thread", None)
+            if callable(close):
+                close()
 
     def consumer() -> None:
         while True:

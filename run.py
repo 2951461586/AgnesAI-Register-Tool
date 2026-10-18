@@ -271,6 +271,9 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return 6
+        finally:
+            # 🔴 自查用的是主线程的 thread-local 浏览器 —— 不关就留到进程退出。
+            _provider.close_thread()
         print(f"  ✓ captcha 自查通过（{time.time() - _t_cap:.1f}s）", flush=True)
 
     t0 = time.time()

@@ -849,3 +849,34 @@ def test_rotate_slot_moves_to_a_slot_with_room(monkeypatch):
 
     assert L._rotate_slot(pool, holder, error="test") is True
     assert holder.proxy == "free", f"应换到有空位的出口，实际 {holder.proxy!r}"
+
+
+def test_producer_closes_captcha_thread_browser(monkeypatch):
+    """生产者线程结束时必须关掉它的 thread-local 浏览器。
+
+    🔴 Playwright 的 sync 对象只能在创建它的线程里关闭 ⇒ 清理只能在该线程的
+       finally 里做。这里用假 provider 钉住“确实调了”。
+    """
+    closed = []
+
+    class FakeCaptcha:
+        def solve(self, email, *, proxy=None):
+            return ("ticket-1", "@rand-1")
+
+        def close_thread(self):
+            closed.append(1)
+
+    results = _run(monkeypatch, captcha_provider=FakeCaptcha())
+    assert results[0].status == "success"
+    assert closed == [1]
+
+
+def test_producer_tolerates_provider_without_close_thread(monkeypatch):
+    """注入的假 provider 没有 close_thread 时，wrapper 不能把它当错误。"""
+
+    class BareCaptcha:
+        def solve(self, email, *, proxy=None):
+            return ("ticket-1", "@rand-1")
+
+    results = _run(monkeypatch, captcha_provider=BareCaptcha())
+    assert results[0].status == "success"

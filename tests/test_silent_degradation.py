@@ -72,11 +72,14 @@ def _fn_name(node, parents):
 
 # (相对路径, 函数名) —— 这些循环的"耗尽"本身就是设计好的正常出口。
 LOOP_ALLOWED = {
-    ("src/captcha_solver.py", "_ncc_peaks"): (
-        "两个循环都是**笛卡尔积扫描**（scale × angle，之后收集局部极大值）："
-        "`continue` 是“这个尺度/角度超出图尺寸，跳过”，耗尽 = “这个网格里没峰” ——"
-        "返回 `[]` 是它的正常出口，调用方（`solve_arrays`）会把空峰当低分处理。"
-        "这不是重试循环，不存在“耗尽后静默降级”的形态。"
+    ("src/captcha_solver.py", "_select_peaks"): (
+        "两个循环都是**top-K 选取扫描**（尺度分桶优先 + 按分数补位）："
+        "`continue` 是“这个桶已经有一个峰了 / 离已选峰太近”，耗尽 = "
+        "找不到 K 个互不重叠的峰 —— 返回已选中的那些（可能是 `[]`）就是正常出口。"
+        "这不是重试循环，没有“成功/失败”语义，也不存在耗尽后的静默降级。"
+        "⚠ 原来这条挂在 `_ncc_peaks` 上；P1–P3 把扫描与选峰拆开后，扫描循环"
+        "搬进了 `_iter_ncc`（只 `yield`、不 `continue` 消耗尝试），选峰逻辑留在"
+        "这里 ⇒ 白名单跟着搬。"
     ),
     ("src/captcha.py", "_find_captcha_frame"): (
         "遍历 `page.frames` 找 captcha iframe。`continue` 是**跳过 detach 的 frame**，"
