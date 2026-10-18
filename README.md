@@ -23,8 +23,8 @@ TCaptcha 点选 —— 由可选的 **headless Playwright** provider 处理（�
 
 本项目是 [Intern-Register-Tool] 架构的**第三个同族实现**（继
 [Hark-Register-Tool] 之后），目录与分层刻意保持一致，便于在三者之间迁移经验：
-`common/config/` + `src/{tempmail,agnes,apikey,pipeline,ledger,quota,report,redact,fsutil,cli}.py` +
-`run.py` + `docs/` + `tests/` + `tools/`。
+`common/config/` + `src/` + `run.py` + `docs/` + `tests/` + `tools/`。
+（完整目录见下面的「目录」。）
 
 ---
 
@@ -43,8 +43,8 @@ python run.py --count 4 --preflight    # 跑批前先体检出口链路（不耗
 ```
 
 🔴 **批量前建议加 `--preflight`**：注册窗口是本工具最贵且**不可再生**的资源
-（撞上要等一个窗口；长度见 `docs/protocol.md` §3 —— 实测上界远小于最初的
-保守假设）。预检只打只读请求，**不消耗注册窗口**；判定链路处于
+（撞上要等一个窗口；长度见 `docs/protocol.md` §3 —— 下界已到 45.37 分钟，
+上界仍未测准）。预检只打只读请求，**不消耗注册窗口**；判定链路处于
 坏时段就**中止**（退出码 6），而不是把窗口白烧掉。
 判据不是"失败率高低"，而是"**多数出口一起坏**吗"—— 个别坏槽位不该拦住整批
 （撞到它换出口就行）。详见 `src/preflight.py`。
@@ -65,7 +65,7 @@ python run.py --count 4 --preflight    # 跑批前先体检出口链路（不耗
 | `AR_KEY_NAME` | — | 创建的 API Key 名称，默认 `auto` |
 | `AR_VERIFY_MODEL` / `AR_VERIFY_CHAT` | — | key 校验用的模型 / 是否真打一次 chat |
 | `AR_CAPTCHA_ENABLED` / `AR_CAPTCHA_HEADLESS` / `AR_CAPTCHA_TIMEOUT_S` | — | TCaptcha 点选 provider（默认**开**、**headless**、**直连**）。关掉后发码会被服务端 400 拒绝。完整项见 `.env.example` |
-| `AR_REGISTER_MAX_PER_WINDOW` / `AR_REGISTER_WINDOW_S` | — | **按出口**的注册尝试限速（默认 **2 次** = **1 个账号** / **3600s**；IP 阈值实测 ≈4，所以留了余量）。⚠ 计的是**请求**，不是一个账号一枪 |
+| `AR_REGISTER_MAX_PER_WINDOW` / `AR_REGISTER_WINDOW_S` | — | **按出口**的注册尝试限速（默认 **4 次** = **2 个账号** / **3600s**；IP 阈值实测 ≈4，默认值**贴着实测阈值**，频繁撞 IP 就调回 2）。⚠ 计的是**请求**，不是一个账号一枪 |
 | `AR_DOMAIN_MAX_PER_WINDOW` / `AR_DOMAIN_WINDOW_S` | — | **按收信域名**的注册尝试限速（默认 **8 次** = **4 个账号** / 3600s；域名阈值实测 ≈10）。与 IP 维度**分开配** |
 | `AR_LIMITER_MAX_WAIT_S` | — | 本地闸门「等不起就换维度」阈值（秒，默认 20） |
 | `AR_REG_QUOTA_MAX` / `AR_REG_QUOTA_WINDOW_H` | — | **爆炸半径上限**（默认 30 / 24h），不是服务端配额 |
@@ -91,9 +91,9 @@ Agnes 对**注册尝试**（`/api/verification` 与 `/api/user/register`，**共
 
 - 🔴 **窗口计的是「请求」，而一个账号要打两枪**（发码 + 注册共用同一张计数）
   ⇒ 上限 `MAX` 实际只放行 `MAX/2` 个账号/窗口。2026-10-18 起默认
-  `AR_REGISTER_MAX_PER_WINDOW=2`（1 个账号）/ `AR_DOMAIN_MAX_PER_WINDOW=8`
-  （4 个账号）—— IP 阈值实测 ≈4、域名阈值实测 ≈10，所以都留了余量。
-  想跑 N 个账号，两个维度的上限都要 ≥ `2N`。这一点曾被读成"2 个账号"，
+  `AR_REGISTER_MAX_PER_WINDOW=4`（2 个账号）/ `AR_DOMAIN_MAX_PER_WINDOW=8`
+  （4 个账号）—— IP 阈值实测 ≈4（默认值贴边，撞了就调回 2）、域名阈值实测
+  ≈10（8 留 2 格余量）。想跑 N 个账号，两个维度的上限都要 ≥ `2N`。这一点曾被读成"2 个账号"，
   直接导致"码烧了、注册进不去"（见下面第 4 点）；
 - **只调大 `--producers` 不会提高吞吐** —— 那是同一张窗口里的名额；
 - 提高吞吐要**两个杠杆一起上**：`AR_PROXY_SLOTS`（N 个出口 = N 张 IP 窗口）
@@ -210,7 +210,6 @@ tools/               探针与运维脚本
 ```bash
 python tools/probes/probe_domains.py         # 哪些收信域名真能收到 Agnes 的信
 python tools/probes/probe_window_limits.py   # 受控测窗口长度 / 子域是否共窗（默认只打印计划）
-python tools/probes/probe_window_limits.py   # 受控测窗口长度 / 子域是否共窗（默认只打印计划）
 python tools/probes/probe_slots.py           # 出口池：IP 是否两两不同 / Agnes 是否可达
 python tools/probes/probe_captcha_egress.py  # captcha 出口质量：直连 vs 代理（A 段不耗窗口）
 python tools/ops/analyze_window_recovery.py  # 台账反推窗口恢复间隔（**零窗口代价**）
@@ -265,13 +264,14 @@ CI（`.github/workflows/ci.yml`）跑上面四样 + `gitleaks` 密钥扫描（**
   降级策略：一次 45s 超时 → 换出口重试一次。失败记 `error_kind="captcha"`
   （**不是** `rejected`）。实测数据见 `docs/protocol.md` §2②。
 - ⚠ **captcha provider 每路生产者启一个 headless Chromium**：`--producers 4`
-  = 4 个浏览器实例（每个约 300MB），且单题求解要 ~6~10s。批量时注意内存；
-  `--producers` 的实际收益受内存与注册窗口双重限制。
+  = 4 个浏览器实例（每个约 300MB），单题求解通常 **20~45s**（含浏览器与
+  图片加载）。批量时注意内存；`--producers` 的实际收益受内存与注册窗口双重限制。
 - ⚠ **captcha 依赖是可选 extra** —— 不装 `pip install -e ".[captcha]"` 时
   `config.validate()` 会在启动阶段报错；设 `AR_CAPTCHA_ENABLED=0` 可关掉，
   但发码会被服务端 400 拒绝。
-- **限流阈值仍未全部测准** —— 域名阈值已实测（见 `docs/protocol.md` §3），
-  但 **IP 阈值**仍未知；默认值留了安全余量，不是服务端阈值的精确复刻。
+- **限流阈值/窗口仍不是精确复刻** —— 域名阈值 ≈10、IP 阈值 ≈4 已实测，
+  窗口下界 >45.37 分钟；默认值按这些数字调过，但**上界仍未知**（见
+  `docs/protocol.md` §3）。
 - **单出口 / 单域名吞吐有限**：两个杠杆（`AR_PROXY_SLOTS` + `AR_MAIL_DOMAINS`）
   不一起配时，批量会被同一张 IP 或域名窗口卡住。
 - **可用域名受 Agnes 侧白名单限制** —— 邮箱源有**三个**（自有 CF Worker 域名 /

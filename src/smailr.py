@@ -7,7 +7,7 @@
     smailr.com / loc.cc / mail.nodeloc.cc / nodeloc.cc      ✅✅✅✅
 
 ⇒ 域名池 7 → **11** ⇒ 11 个账号/小时。**三个源里最值的一个**
-（catchmail 只给 3 个）。域名数是吞吐的硬上限（域名维度 2 格 = 1 个账号），
+（catchmail 只给 3 个）。域名数是吞吐的硬上限（`DOMAIN_MAX_PER_WINDOW` 格 = MAX/2 个账号），
 所以"多一个源"是唯一能加域名窗口的手段。
 
 🔴 账号等级是硬门（实测撞到过）

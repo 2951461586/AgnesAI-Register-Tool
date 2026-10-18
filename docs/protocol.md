@@ -257,7 +257,7 @@ live 5 批的成功数：`2/5`（旧 solver）→ `1/5`（新 solver + 代理 ca
   各测一次结果一致。合理推测：`outlook.com` 正是"账号池 / 接码平台"的重灾区，
   所以进了滥用名单。⇒ **不要**把接码平台买的 `@outlook.com` 当作可用域名。
 
-  🔴 **域名数是吞吐的硬上限**（域名维度 2 格 = 1 个账号）⇒ 可用域名数直接决定
+  🔴 **域名数是吞吐的硬上限**（`DOMAIN_MAX_PER_WINDOW` 格 = MAX/2 个账号）⇒ 可用域名数直接决定
   每小时能跑几个。把被拒的域名加进域名池只会拿到确定性的 `rejected`，
   **还会白烧一格 IP 窗口** —— 没有收益，只有损失。
 
@@ -441,7 +441,7 @@ POST https://apihub.agnes-ai.com/v1/chat/completions {"model":"agnes-2.5-flash",
 
   🔴 **推论（很重要，曾被读错）：窗口计的是「请求」，而一个账号要打两枪**
   ⇒ 上限 `MAX` 实际只放行 `MAX/2` 个账号/窗口。2026-10-18 起默认
-  `AR_REGISTER_MAX_PER_WINDOW=2` / `AR_DOMAIN_MAX_PER_WINDOW=8`
+  `AR_REGISTER_MAX_PER_WINDOW=4` / `AR_DOMAIN_MAX_PER_WINDOW=8`
   （IP 阈值实测 ≈4、域名阈值实测 ≈10，所以都留了余量）。
   想跑 N 个账号，两个维度的上限都要 ≥ `2N`。
 

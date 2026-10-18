@@ -79,6 +79,6 @@ def test_lint_does_not_repeat_validate_with_a_silly_suggestion(monkeypatch):
 
 
 def test_default_config_is_clean():
-    """默认值（2 次 = 1 个账号）既不该被拦、也不该有警告。"""
+    """默认值（4 次 = 2 个账号）既不该被拦、也不该有警告。"""
     assert _max_entries(config.validate()) == []
     assert _max_entries(config.lint()) == []
